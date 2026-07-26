@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package weaver.example.v1;
+
+option go_package = "github.com/project-kgo/weaver/examples/echo/gen/example/v1;examplev1";
+
+service UpperService {
+  rpc Upper(UpperRequest) returns (UpperResponse);
+}
+
+service EchoService {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+message UpperRequest {
+  string value = 1;
+}
+
+message UpperResponse {
+  string value = 1;
+}
+
+message EchoRequest {
+  string value = 1;
+}
+
+message EchoResponse {
+  string value = 1;
+}

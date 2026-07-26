@@ -1,0 +1,7 @@
+units:
+  core: http://127.0.0.1:8081
+  game: http://127.0.0.1:8082
+
+placements:
+  weaver.example.v1.UpperService: core
+  weaver.example.v1.EchoService: game
