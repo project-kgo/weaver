@@ -44,9 +44,14 @@ func run() error {
 		return err
 	}
 
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
 	server := &http.Server{
 		Addr:              *listenAddress,
 		Handler:           runtime.Handler(),
+		Protocols:         protocols,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serveError := make(chan error, 1)

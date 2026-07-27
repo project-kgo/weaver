@@ -40,5 +40,13 @@ func (r staticResolver) Resolve(_ context.Context, target string) (ResolvedTarge
 }
 
 func defaultHTTPClient() connect.HTTPClient {
-	return &http.Client{}
+	protocols := new(http.Protocols)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
+
+	// 跨 unit 调用默认只使用 HTTP/2。明文目标使用 h2c prior knowledge，
+	// 不启用 HTTP/1，避免失败后重发可能非幂等的 RPC。
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Protocols = protocols
+	return &http.Client{Transport: transport}
 }

@@ -5,7 +5,7 @@ Weaver 是一个很薄的 ConnectRPC 部署感知运行时。它让同一份 Go 
 核心原则只有三条：
 
 1. protobuf service 是组件边界，unit 是部署与故障边界。
-2. 同 unit 直接调用 Go 实现，跨 unit 使用 ConnectRPC。
+2. 同 unit 直接调用 Go 实现，跨 unit 使用基于 HTTP/2 的 ConnectRPC。
 3. 注册、Handler 挂载、Client 创建和依赖注入由代码生成完成。
 
 它不是 Service Weaver 的重写，也不负责调度、扩缩容、动态迁移、服务注册或负载均衡。
@@ -90,7 +90,24 @@ game.wallet.v1.WalletService:
 
 `http` 和 `https` 使用内置静态 Resolver。其他 scheme 通过 `WithResolver` 注册；Resolver 返回的 `HTTPClient` 自行负责实例变化、连接池和负载均衡。Weaver 只在启动阶段解析并缓存目标。
 
+内置静态 Resolver 的默认 Client 强制使用 HTTP/2：`http://` 目标使用明文 h2c prior knowledge，`https://` 目标使用 TLS HTTP/2，不会在连接失败后回退到 HTTP/1.1。远程 unit 因此必须启用对应的 HTTP/2 支持。通过 `WithHTTPClient` 或自定义 Resolver 提供 Client 时，调用方负责保证 Client 支持目标所需的 HTTP/2 传输。
+
 组件创建顺序为：严格校验全部组件配置、创建全部本地实例、注入 `WithConfig`/`Resource`/`Ref`、按依赖顺序执行 `Init`、挂载当前 unit 的 Handler。关闭时按相反顺序执行 `Shutdown`。普通资源由调用方管理生命周期。
+
+Connect 生成的 Handler 会在同一路径上自动接受 Connect、gRPC 和 gRPC-Web。Runtime 不接管 `http.Server`，业务启动代码需要同时启用 HTTP/1、TLS HTTP/2 和明文 HTTP/2，才能兼容普通 HTTP 调用、HTTPS gRPC 和明文 h2c gRPC：
+
+```go
+protocols := new(http.Protocols)
+protocols.SetHTTP1(true)
+protocols.SetHTTP2(true)
+protocols.SetUnencryptedHTTP2(true)
+
+server := &http.Server{
+    Addr:      ":8080",
+    Handler:   runtime.Handler(),
+    Protocols: protocols,
+}
+```
 
 ## 示例
 
@@ -137,7 +154,18 @@ curl -H 'Content-Type: application/json' \
   http://127.0.0.1:8082/weaver.example.v1.EchoService/Echo
 ```
 
-两种部署都会返回 `{"value":"echo:HELLO"}`。
+也可以从仓库根目录通过明文 HTTP/2 使用 gRPC 协议调用同一个 Handler：
+
+```bash
+buf curl \
+  --schema examples/echo \
+  --protocol grpc \
+  --http2-prior-knowledge \
+  --data '{"value":"hello"}' \
+  http://127.0.0.1:8082/weaver.example.v1.EchoService/Echo
+```
+
+HTTPS 地址不需要 `--http2-prior-knowledge`，Client 会通过 TLS ALPN 协商 HTTP/2。两种调用都会返回 `{"value":"echo:HELLO"}`。
 
 ## v0.1 边界
 
@@ -147,3 +175,4 @@ curl -H 'Content-Type: application/json' \
 - 组件依赖必须是无环图。
 - Connect interceptor 只处理传输层。业务校验、鉴权规则和领域错误不能只放在远程 Handler interceptor 中。
 - Handler 不得修改 request；组件边界始终按“可能经过网络”设计。
+- 默认跨 unit Client 只使用 HTTP/2，不自动探测或回退到 HTTP/1.1。

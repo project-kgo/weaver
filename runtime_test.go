@@ -3,6 +3,8 @@ package weaver
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -162,6 +164,42 @@ func callerService() Service[callerAPI] {
 	}
 }
 
+func startHTTP2TestServer(handler http.Handler, useTLS bool) *httptest.Server {
+	server := httptest.NewUnstartedServer(handler)
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
+	server.Config.Protocols = protocols
+	if useTLS {
+		server.EnableHTTP2 = true
+		server.StartTLS()
+	} else {
+		server.Start()
+	}
+	return server
+}
+
+func trustTestServer(t *testing.T, client connect.HTTPClient, server *httptest.Server) connect.HTTPClient {
+	t.Helper()
+	httpClient, ok := client.(*http.Client)
+	if !ok {
+		t.Fatalf("unexpected client type %T", client)
+	}
+	transport, ok := httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("unexpected transport type %T", httpClient.Transport)
+	}
+	serverTransport, ok := server.Client().Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("unexpected test server transport type %T", server.Client().Transport)
+	}
+	trustedTransport := transport.Clone()
+	trustedTransport.TLSClientConfig = serverTransport.TLSClientConfig.Clone()
+	t.Cleanup(trustedTransport.CloseIdleConnections)
+	return &http.Client{Transport: trustedTransport}
+}
+
 func testRegistry(t *testing.T, events *[]string, upperResult **upperImpl, callerResult **callerImpl) *Registry {
 	t.Helper()
 	registry := NewRegistry()
@@ -235,6 +273,114 @@ func configRegistry(t *testing.T, result **configurableUpper, factoryCalled *boo
 		t.Fatal(err)
 	}
 	return registry
+}
+
+func TestDefaultHTTPClientUsesHTTP2(t *testing.T) {
+	client, ok := defaultHTTPClient().(*http.Client)
+	if !ok {
+		t.Fatalf("unexpected client type %T", defaultHTTPClient())
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("unexpected transport type %T", client.Transport)
+	}
+	if transport.Protocols == nil || transport.Protocols.HTTP1() || !transport.Protocols.HTTP2() || !transport.Protocols.UnencryptedHTTP2() {
+		t.Fatalf("unexpected protocols: %v", transport.Protocols)
+	}
+
+	for _, test := range []struct {
+		name   string
+		useTLS bool
+	}{
+		{name: "h2c"},
+		{name: "tls", useTLS: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var httpMajor int
+			var contentType string
+			var rpcProtocol string
+			interceptor := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+				return func(ctx context.Context, request connect.AnyRequest) (connect.AnyResponse, error) {
+					mu.Lock()
+					rpcProtocol = request.Peer().Protocol
+					mu.Unlock()
+					return next(ctx, request)
+				}
+			})
+			rpcHandler := connect.NewUnaryHandlerSimple(
+				upperProcedure,
+				func(_ context.Context, request *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+					return wrapperspb.String(strings.ToUpper(request.Value)), nil
+				},
+				connect.WithInterceptors(interceptor),
+			)
+			handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				mu.Lock()
+				httpMajor = request.ProtoMajor
+				contentType = request.Header.Get("Content-Type")
+				mu.Unlock()
+				rpcHandler.ServeHTTP(response, request)
+			})
+			server := startHTTP2TestServer(handler, test.useTLS)
+			defer server.Close()
+
+			httpClient := defaultHTTPClient()
+			if test.useTLS {
+				httpClient = trustTestServer(t, httpClient, server)
+			}
+			rpcClient := connect.NewClient[wrapperspb.StringValue, wrapperspb.StringValue](httpClient, server.URL+upperProcedure)
+			response, err := rpcClient.CallUnary(context.Background(), connect.NewRequest(wrapperspb.String("hello")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.Msg.Value != "HELLO" {
+				t.Fatalf("unexpected response %q", response.Msg.Value)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if httpMajor != 2 {
+				t.Fatalf("expected HTTP/2, got HTTP/%d", httpMajor)
+			}
+			if rpcProtocol != connect.ProtocolConnect {
+				t.Fatalf("expected Connect protocol, got %q", rpcProtocol)
+			}
+			if strings.HasPrefix(contentType, "application/grpc") {
+				t.Fatalf("expected Connect content type, got %q", contentType)
+			}
+		})
+	}
+}
+
+func TestDefaultHTTPClientDoesNotFallbackToHTTP1(t *testing.T) {
+	var mu sync.Mutex
+	handlerCalls := 0
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		// HTTP/1 server可能把 HTTP/2 连接前言解析成 PRI 请求；它不是 RPC 回退。
+		if request.Method == http.MethodPost && request.URL.Path == upperProcedure {
+			mu.Lock()
+			handlerCalls++
+			mu.Unlock()
+		}
+		http.Error(response, "unexpected HTTP/1 request", http.StatusBadRequest)
+	})
+	server := httptest.NewUnstartedServer(handler)
+	server.Config.ErrorLog = log.New(io.Discard, "", 0)
+	server.Start()
+	defer server.Close()
+
+	client := connect.NewClient[wrapperspb.StringValue, wrapperspb.StringValue](defaultHTTPClient(), server.URL+upperProcedure)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := client.CallUnary(ctx, connect.NewRequest(wrapperspb.String("hello"))); err == nil {
+		t.Fatal("expected HTTP/2 connection to fail against HTTP/1-only server")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if handlerCalls != 0 {
+		t.Fatalf("unexpected HTTP/1 fallback requests: %d", handlerCalls)
+	}
 }
 
 func TestComponentConfigInjection(t *testing.T) {
@@ -451,7 +597,16 @@ func TestRuntimeDirectAndRemote(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		server := httptest.NewServer(coreRuntime.Handler())
+		var requestMu sync.Mutex
+		var remoteHTTPMajor int
+		var remoteContentType string
+		server := startHTTP2TestServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			requestMu.Lock()
+			remoteHTTPMajor = request.ProtoMajor
+			remoteContentType = request.Header.Get("Content-Type")
+			requestMu.Unlock()
+			coreRuntime.Handler().ServeHTTP(response, request)
+		}), false)
 		defer server.Close()
 
 		var gameEvents []string
@@ -480,6 +635,13 @@ func TestRuntimeDirectAndRemote(t *testing.T) {
 		_, err = gameCaller.Call(context.Background(), wrapperspb.String("error"))
 		if connect.CodeOf(err) != connect.CodeUnknown {
 			t.Fatalf("expected unknown, got %v", err)
+		}
+		requestMu.Lock()
+		observedHTTPMajor := remoteHTTPMajor
+		observedContentType := remoteContentType
+		requestMu.Unlock()
+		if observedHTTPMajor != 2 || strings.HasPrefix(observedContentType, "application/grpc") {
+			t.Fatalf("expected cross-unit Connect over HTTP/2, got HTTP/%d content-type %q", observedHTTPMajor, observedContentType)
 		}
 		if err := gameRuntime.Shutdown(context.Background()); err != nil {
 			t.Fatal(err)
@@ -538,7 +700,7 @@ func TestCancellationCodesMatch(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer coreRuntime.Shutdown(context.Background())
-		server := httptest.NewServer(coreRuntime.Handler())
+		server := startHTTP2TestServer(coreRuntime.Handler(), false)
 		defer server.Close()
 
 		var gameEvents []string

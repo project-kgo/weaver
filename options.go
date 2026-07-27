@@ -85,6 +85,7 @@ func WithResolver(scheme string, resolver Resolver) Option {
 }
 
 // WithHTTPClient 设置 http/https 静态目标共用的客户端。
+// 跨 unit 调用要求客户端支持 HTTP/2；明文 http 目标还必须支持 h2c。
 func WithHTTPClient(client connect.HTTPClient) Option {
 	return optionFunc(func(options *runtimeOptions) error {
 		if client == nil || isNil(client) {

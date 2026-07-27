@@ -2,9 +2,12 @@ package echo_test
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +38,71 @@ func TestGeneratedCodeEndToEnd(t *testing.T) {
 	})
 }
 
+func TestUnitHandlerSupportsConnectAndGRPC(t *testing.T) {
+	config := loadConfig(t, "monolith.yaml")
+	var mu sync.Mutex
+	var requests []observedHTTPRequest
+	server := startUnitServer(t, "app", config, false, func(request *http.Request) {
+		mu.Lock()
+		requests = append(requests, observedHTTPRequest{
+			httpMajor:   request.ProtoMajor,
+			contentType: request.Header.Get("Content-Type"),
+		})
+		mu.Unlock()
+	})
+
+	connectClient := examplev1connect.NewEchoServiceClient(server.Client(), server.URL)
+	assertEchoBehavior(t, connectClient)
+	grpcClient := examplev1connect.NewEchoServiceClient(newH2CClient(t), server.URL, connect.WithGRPC())
+	assertEchoBehavior(t, grpcClient)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !hasObservedRequest(requests, 1, "application/grpc", false) {
+		t.Fatalf("expected Connect request over HTTP/1, got %#v", requests)
+	}
+	if !hasObservedRequest(requests, 2, "application/grpc", true) {
+		t.Fatalf("expected gRPC request over HTTP/2, got %#v", requests)
+	}
+}
+
+func TestUnitHandlerSupportsGRPCOverTLS(t *testing.T) {
+	config := loadConfig(t, "monolith.yaml")
+	var mu sync.Mutex
+	var requests []observedHTTPRequest
+	server := startUnitServer(t, "app", config, true, func(request *http.Request) {
+		mu.Lock()
+		requests = append(requests, observedHTTPRequest{
+			httpMajor:   request.ProtoMajor,
+			contentType: request.Header.Get("Content-Type"),
+		})
+		mu.Unlock()
+	})
+
+	client := examplev1connect.NewEchoServiceClient(server.Client(), server.URL, connect.WithGRPC())
+	assertEchoBehavior(t, client)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !hasObservedRequest(requests, 2, "application/grpc", true) {
+		t.Fatalf("expected gRPC request over TLS HTTP/2, got %#v", requests)
+	}
+}
+
+type observedHTTPRequest struct {
+	httpMajor   int
+	contentType string
+}
+
+func hasObservedRequest(requests []observedHTTPRequest, httpMajor int, contentTypePrefix string, matchesPrefix bool) bool {
+	for _, request := range requests {
+		if request.httpMajor == httpMajor && strings.HasPrefix(request.contentType, contentTypePrefix) == matchesPrefix {
+			return true
+		}
+	}
+	return false
+}
+
 func loadConfig(t *testing.T, name string) weaver.Config {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("config", name))
@@ -49,12 +117,34 @@ func loadConfig(t *testing.T, name string) weaver.Config {
 }
 
 func startUnit(t *testing.T, unit string, config weaver.Config, options ...weaver.Option) *httptest.Server {
+	return startUnitServer(t, unit, config, false, nil, options...)
+}
+
+func startUnitServer(t *testing.T, unit string, config weaver.Config, useTLS bool, observe func(*http.Request), options ...weaver.Option) *httptest.Server {
 	t.Helper()
 	runtime, err := weaver.New(context.Background(), unit, config, options...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(runtime.Handler())
+	handler := runtime.Handler()
+	if observe != nil {
+		handler = http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			observe(request)
+			runtime.Handler().ServeHTTP(response, request)
+		})
+	}
+	server := httptest.NewUnstartedServer(handler)
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
+	server.Config.Protocols = protocols
+	if useTLS {
+		server.EnableHTTP2 = true
+		server.StartTLS()
+	} else {
+		server.Start()
+	}
 	t.Cleanup(func() {
 		server.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -64,6 +154,16 @@ func startUnit(t *testing.T, unit string, config weaver.Config, options ...weave
 		}
 	})
 	return server
+}
+
+func newH2CClient(t *testing.T) *http.Client {
+	t.Helper()
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Protocols = protocols
+	t.Cleanup(transport.CloseIdleConnections)
+	return &http.Client{Transport: transport}
 }
 
 func assertEchoBehavior(t *testing.T, client examplev1connect.EchoServiceClient) {
