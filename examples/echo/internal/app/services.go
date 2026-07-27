@@ -11,18 +11,18 @@ import (
 	examplev1weaver "github.com/project-kgo/weaver/examples/echo/gen/example/v1/examplev1weaver"
 )
 
-// Settings 演示普通类型资源注入。
+// Settings 演示按组件注入的 YAML 配置。
 type Settings struct {
-	Prefix string
+	Prefix string `yaml:"prefix"`
 }
 
 type upperService struct {
 	weaver.Implements[examplev1weaver.UpperServiceComponent]
-	Settings weaver.Resource[*Settings]
+	weaver.WithConfig[Settings]
 }
 
 func (service *upperService) Init(context.Context) error {
-	if service.Settings.Get().Prefix == "" {
+	if service.Config().Prefix == "" {
 		return fmt.Errorf("prefix 不能为空")
 	}
 	return nil
@@ -36,7 +36,7 @@ func (service *upperService) Upper(ctx context.Context, request *examplev1.Upper
 		return nil, errors.New("upper service failed")
 	}
 	return &examplev1.UpperResponse{
-		Value: service.Settings.Get().Prefix + strings.ToUpper(request.GetValue()),
+		Value: service.Config().Prefix + strings.ToUpper(request.GetValue()),
 	}, nil
 }
 

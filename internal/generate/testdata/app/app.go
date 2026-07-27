@@ -9,8 +9,13 @@ import (
 	"github.com/project-kgo/weaver/internal/generate/testdata/components"
 )
 
+type upperConfig struct {
+	Prefix string `yaml:"prefix"`
+}
+
 type upper struct {
 	weaver.Implements[components.UpperComponent]
+	weaver.WithConfig[upperConfig]
 	Database weaver.Resource[*sql.DB]
 }
 

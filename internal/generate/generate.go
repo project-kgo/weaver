@@ -36,6 +36,7 @@ type componentModel struct {
 	implementation string
 	componentType  types.Type
 	descriptor     descriptorModel
+	config         *fieldModel
 	refs           []fieldModel
 	resources      []fieldModel
 }
@@ -241,6 +242,17 @@ func scanComponent(implementation string, structure *types.Struct) (componentMod
 			model.refs = append(model.refs, fieldModel{name: field.Name(), valueType: argument, descriptor: descriptor})
 		case "Resource":
 			model.resources = append(model.resources, fieldModel{name: field.Name(), valueType: argument})
+		case "WithConfig":
+			if !field.Embedded() {
+				return componentModel{}, false, fmt.Errorf("WithConfig[T] 必须匿名嵌入")
+			}
+			if model.config != nil {
+				return componentModel{}, false, fmt.Errorf("只能声明一个 WithConfig[T]")
+			}
+			if _, ok := argument.Underlying().(*types.Struct); !ok {
+				return componentModel{}, false, fmt.Errorf("WithConfig[T] 的 T 必须是结构体，得到 %s", types.TypeString(argument, nil))
+			}
+			model.config = &fieldModel{name: field.Name(), valueType: argument}
 		}
 	}
 	return model, foundImplementation, nil
@@ -257,7 +269,7 @@ func weaverGeneric(value types.Type) (string, types.Type, bool) {
 		return "", nil, false
 	}
 	switch object.Name() {
-	case "Implements", "Ref", "Resource":
+	case "Implements", "Ref", "Resource", "WithConfig":
 		return object.Name(), types.Unalias(named.TypeArgs().At(0)), true
 	default:
 		return "", nil, false
@@ -319,6 +331,26 @@ func (m *importManager) qualifier(pkg *types.Package) string {
 	return alias
 }
 
+func (m *importManager) reserve(importPath, preferred string) string {
+	if alias, exists := m.byPath[importPath]; exists {
+		return alias
+	}
+	base := sanitizeIdentifier(preferred)
+	if base == "" {
+		base = "pkg"
+	}
+	alias := base
+	for suffix := 2; ; suffix++ {
+		if existing, exists := m.usedAliases[alias]; !exists || existing == importPath {
+			break
+		}
+		alias = base + strconv.Itoa(suffix)
+	}
+	m.byPath[importPath] = alias
+	m.usedAliases[alias] = importPath
+	return alias
+}
+
 func (m *importManager) descriptor(value descriptorModel) string {
 	alias := m.qualifier(value.packageRef)
 	if alias == "" {
@@ -329,8 +361,14 @@ func (m *importManager) descriptor(value descriptorModel) string {
 
 func renderPackage(model packageModel) ([]byte, error) {
 	imports := newImportManager(model.path)
+	for _, component := range model.components {
+		if component.config != nil {
+			imports.reserve("reflect", "reflect")
+			break
+		}
+	}
 	var body bytes.Buffer
-	body.WriteString("var _ [weaver.CodegenVersion]struct{} = [1]struct{}{}\n\n")
+	body.WriteString("var _ [weaver.CodegenVersion]struct{} = [2]struct{}{}\n\n")
 	body.WriteString("func init() {\n")
 	for _, component := range model.components {
 		renderRegistration(&body, imports, component)
@@ -370,6 +408,10 @@ func renderRegistration(output *bytes.Buffer, imports *importManager, component 
 	descriptor := imports.descriptor(component.descriptor)
 	fmt.Fprintln(output, "\tweaver.MustRegister(weaver.Registration{")
 	fmt.Fprintf(output, "\t\tService: %s.Descriptor(),\n", descriptor)
+	if component.config != nil {
+		typeName := types.TypeString(component.config.valueType, imports.qualifier)
+		fmt.Fprintf(output, "\t\tConfigType: %s.TypeFor[%s](),\n", imports.byPath["reflect"], typeName)
+	}
 	fmt.Fprintf(output, "\t\tNew: func() any { return new(%s) },\n", component.implementation)
 	fmt.Fprintln(output, "\t\tInject: func(target any, injector weaver.Injector) error {")
 	fmt.Fprintf(output, "\t\t\tcomponent := target.(*%s)\n", component.implementation)
@@ -389,6 +431,14 @@ func renderRegistration(output *bytes.Buffer, imports *importManager, component 
 		fmt.Fprintln(output, "\t\t\t\treturn err")
 		fmt.Fprintln(output, "\t\t\t}")
 		fmt.Fprintf(output, "\t\t\tweaver.SetResource(&component.%s, resource%d)\n", field.name, index)
+	}
+	if component.config != nil {
+		typeName := types.TypeString(component.config.valueType, imports.qualifier)
+		fmt.Fprintf(output, "\t\t\tconfig, err := weaver.ResolveConfig[%s](injector)\n", typeName)
+		fmt.Fprintln(output, "\t\t\tif err != nil {")
+		fmt.Fprintln(output, "\t\t\t\treturn err")
+		fmt.Fprintln(output, "\t\t\t}")
+		fmt.Fprintf(output, "\t\t\tweaver.SetConfig(&component.%s, config)\n", component.config.name)
 	}
 	fmt.Fprintln(output, "\t\t\treturn nil")
 	fmt.Fprintln(output, "\t\t},")

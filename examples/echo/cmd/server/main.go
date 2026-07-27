@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/project-kgo/weaver"
-	"github.com/project-kgo/weaver/examples/echo/internal/app"
+	_ "github.com/project-kgo/weaver/examples/echo/internal/app"
 )
 
 func main() {
@@ -26,7 +26,6 @@ func run() error {
 	unit := flag.String("unit", os.Getenv("APP_UNIT"), "当前部署单元")
 	configPath := flag.String("config", "config/monolith.yaml", "Weaver YAML 配置")
 	listenAddress := flag.String("listen", ":8080", "HTTP 监听地址")
-	prefix := flag.String("prefix", "echo:", "示例前缀")
 	flag.Parse()
 
 	data, err := os.ReadFile(*configPath)
@@ -40,12 +39,7 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	runtime, err := weaver.New(
-		ctx,
-		*unit,
-		config,
-		weaver.WithResource(&app.Settings{Prefix: *prefix}),
-	)
+	runtime, err := weaver.New(ctx, *unit, config)
 	if err != nil {
 		return err
 	}

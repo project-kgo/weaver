@@ -46,6 +46,25 @@ func TestGenerateRejectsInvalidComponentName(t *testing.T) {
 	}
 }
 
+func TestGenerateRejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{pattern: "./internal/generate/testdata/invalid_config_named", want: "WithConfig[T] 必须匿名嵌入"},
+		{pattern: "./internal/generate/testdata/invalid_config_multiple", want: "只能声明一个 WithConfig[T]"},
+		{pattern: "./internal/generate/testdata/invalid_config_type", want: "T 必须是结构体"},
+	}
+	for _, test := range tests {
+		t.Run(filepath.Base(test.pattern), func(t *testing.T) {
+			_, err := Generate(context.Background(), repositoryRoot(t), test.pattern)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
 func TestWriteAtomicAndRemove(t *testing.T) {
 	directory := t.TempDir()
 	filename := filepath.Join(directory, generatedFilename)

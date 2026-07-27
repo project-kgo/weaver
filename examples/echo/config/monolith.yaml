@@ -4,3 +4,6 @@ units:
 placements:
   weaver.example.v1.UpperService: app
   weaver.example.v1.EchoService: app
+
+weaver.example.v1.UpperService:
+  prefix: "echo:"

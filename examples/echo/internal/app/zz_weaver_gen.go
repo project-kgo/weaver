@@ -5,9 +5,10 @@ package app
 import (
 	weaver "github.com/project-kgo/weaver"
 	examplev1weaver "github.com/project-kgo/weaver/examples/echo/gen/example/v1/examplev1weaver"
+	reflect "reflect"
 )
 
-var _ [weaver.CodegenVersion]struct{} = [1]struct{}{}
+var _ [weaver.CodegenVersion]struct{} = [2]struct{}{}
 
 func init() {
 	weaver.MustRegister(weaver.Registration{
@@ -27,15 +28,16 @@ func init() {
 		},
 	})
 	weaver.MustRegister(weaver.Registration{
-		Service: examplev1weaver.UpperService.Descriptor(),
-		New:     func() any { return new(upperService) },
+		Service:    examplev1weaver.UpperService.Descriptor(),
+		ConfigType: reflect.TypeFor[Settings](),
+		New:        func() any { return new(upperService) },
 		Inject: func(target any, injector weaver.Injector) error {
 			component := target.(*upperService)
-			resource0, err := weaver.ResolveResource[*Settings](injector)
+			config, err := weaver.ResolveConfig[Settings](injector)
 			if err != nil {
 				return err
 			}
-			weaver.SetResource(&component.Settings, resource0)
+			weaver.SetConfig(&component.WithConfig, config)
 			return nil
 		},
 	})

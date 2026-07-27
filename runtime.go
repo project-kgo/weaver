@@ -1,6 +1,7 @@
 package weaver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Runtime 是嵌入业务进程的组件容器。
@@ -24,6 +27,7 @@ type Runtime struct {
 	instances     map[string]any
 	localClients  map[string]any
 	remoteClients map[string]any
+	configs       map[string]any
 	resolvedUnits map[string]ResolvedTarget
 	shutdownOrder []any
 
@@ -62,10 +66,14 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 		instances:     make(map[string]any),
 		localClients:  make(map[string]any),
 		remoteClients: make(map[string]any),
+		configs:       make(map[string]any),
 		resolvedUnits: make(map[string]ResolvedTarget),
 	}
 	order, err := runtime.validateAndOrder()
 	if err != nil {
+		return nil, err
+	}
+	if err := runtime.decodeComponentConfigs(order); err != nil {
 		return nil, err
 	}
 
@@ -80,12 +88,12 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 		runtime.instances[name] = instance
 	}
 
-	injector := runtimeInjector{runtime: runtime}
 	for _, name := range order {
 		instance, local := runtime.instances[name]
 		if !local {
 			continue
 		}
+		injector := runtimeInjector{runtime: runtime, component: name}
 		if err := runtime.registrations[name].Inject(instance, injector); err != nil {
 			return nil, fmt.Errorf("weaver: 注入组件 %q 失败: %w", name, err)
 		}
@@ -195,7 +203,8 @@ func (r *Runtime) validateAndOrder() ([]string, error) {
 }
 
 type runtimeInjector struct {
-	runtime *Runtime
+	runtime   *Runtime
+	component string
 }
 
 func (i runtimeInjector) resolveComponent(name string) (any, error) {
@@ -242,6 +251,48 @@ func (i runtimeInjector) resolveResource(resourceType reflect.Type) (any, error)
 		return nil, fmt.Errorf("weaver: 缺少资源 %v", resourceType)
 	}
 	return value, nil
+}
+
+func (i runtimeInjector) resolveConfig(configType reflect.Type) (any, error) {
+	registration, exists := i.runtime.registrations[i.component]
+	if !exists {
+		return nil, fmt.Errorf("weaver: 当前组件 %q 未注册", i.component)
+	}
+	if registration.ConfigType == nil {
+		return nil, fmt.Errorf("weaver: 组件 %q 未声明 WithConfig[T]", i.component)
+	}
+	if registration.ConfigType != configType {
+		return nil, fmt.Errorf("weaver: 组件 %q 的配置类型为 %v，生成代码请求了 %v", i.component, registration.ConfigType, configType)
+	}
+	value, exists := i.runtime.configs[i.component]
+	if !exists {
+		return nil, fmt.Errorf("weaver: 组件 %q 的配置尚未解码", i.component)
+	}
+	return value, nil
+}
+
+func (r *Runtime) decodeComponentConfigs(order []string) error {
+	for _, name := range order {
+		registration := r.registrations[name]
+		data, configured := r.config.componentConfigs[name]
+		if registration.ConfigType == nil {
+			if configured {
+				return fmt.Errorf("weaver: 组件 %q 提供了配置，但实现未声明 WithConfig[T]", name)
+			}
+			continue
+		}
+
+		value := reflect.New(registration.ConfigType)
+		if configured {
+			decoder := yaml.NewDecoder(bytes.NewReader(data))
+			decoder.KnownFields(true)
+			if err := decoder.Decode(value.Interface()); err != nil {
+				return fmt.Errorf("weaver: 解析组件 %q 配置失败: %w", name, err)
+			}
+		}
+		r.configs[name] = value.Elem().Interface()
+	}
+	return nil
 }
 
 func (r *Runtime) resolveUnit(unit string) (ResolvedTarget, error) {
@@ -328,14 +379,18 @@ func topologicalOrder(registrations map[string]Registration) ([]string, error) {
 
 func cloneConfig(config Config) Config {
 	result := Config{
-		Units:      make(map[string]string, len(config.Units)),
-		Placements: make(map[string]string, len(config.Placements)),
+		Units:            make(map[string]string, len(config.Units)),
+		Placements:       make(map[string]string, len(config.Placements)),
+		componentConfigs: make(map[string][]byte, len(config.componentConfigs)),
 	}
 	for name, target := range config.Units {
 		result.Units[name] = target
 	}
 	for name, unit := range config.Placements {
 		result.Placements[name] = unit
+	}
+	for name, data := range config.componentConfigs {
+		result.componentConfigs[name] = append([]byte(nil), data...)
 	}
 	return result
 }

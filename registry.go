@@ -2,6 +2,7 @@ package weaver
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 )
@@ -11,6 +12,7 @@ type Registration struct {
 	Service      ServiceDescriptor
 	New          func() any
 	Inject       func(any, Injector) error
+	ConfigType   reflect.Type
 	Dependencies []string
 }
 
@@ -38,6 +40,9 @@ func (r *Registry) Register(registration Registration) error {
 	}
 	if registration.Service.newLocal == nil || registration.Service.newRemote == nil || registration.Service.newHandler == nil {
 		return fmt.Errorf("weaver: 组件 %q 的服务描述不完整", registration.Service.name)
+	}
+	if registration.ConfigType != nil && registration.ConfigType.Kind() != reflect.Struct {
+		return fmt.Errorf("weaver: 组件 %q 的配置类型必须是结构体，得到 %v", registration.Service.name, registration.ConfigType)
 	}
 
 	r.mu.Lock()

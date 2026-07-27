@@ -30,6 +30,24 @@ type callerAPI interface {
 	Call(context.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error)
 }
 
+type componentSettings struct {
+	Prefix string `yaml:"prefix"`
+}
+
+type configurableUpper struct {
+	WithConfig[componentSettings]
+	initPrefix string
+}
+
+func (u *configurableUpper) Init(context.Context) error {
+	u.initPrefix = u.Config().Prefix
+	return nil
+}
+
+func (u *configurableUpper) Upper(context.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+	return wrapperspb.String(u.Config().Prefix), nil
+}
+
 type upperImpl struct {
 	prefix Resource[*string]
 	events *[]string
@@ -191,6 +209,185 @@ func testRegistry(t *testing.T, events *[]string, upperResult **upperImpl, calle
 		t.Fatal(err)
 	}
 	return registry
+}
+
+func configRegistry(t *testing.T, result **configurableUpper, factoryCalled *bool) *Registry {
+	t.Helper()
+	registry := NewRegistry()
+	if err := registry.Register(Registration{
+		Service:    upperService().Descriptor(),
+		ConfigType: reflect.TypeFor[componentSettings](),
+		New: func() any {
+			*factoryCalled = true
+			implementation := new(configurableUpper)
+			*result = implementation
+			return implementation
+		},
+		Inject: func(target any, injector Injector) error {
+			config, err := ResolveConfig[componentSettings](injector)
+			if err != nil {
+				return err
+			}
+			SetConfig(&target.(*configurableUpper).WithConfig, config)
+			return nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return registry
+}
+
+func TestComponentConfigInjection(t *testing.T) {
+	t.Run("configured before init", func(t *testing.T) {
+		config, err := ParseConfig([]byte("units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\nweaver.test.v1.UpperService:\n  prefix: 'configured:'\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var implementation *configurableUpper
+		factoryCalled := false
+		registry := configRegistry(t, &implementation, &factoryCalled)
+		runtime, err := New(context.Background(), "app", config, WithRegistry(registry))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.Shutdown(context.Background())
+		if !factoryCalled || implementation.initPrefix != "configured:" || implementation.Config().Prefix != "configured:" {
+			t.Fatalf("unexpected config state: called=%v init=%q config=%q", factoryCalled, implementation.initPrefix, implementation.Config().Prefix)
+		}
+	})
+
+	t.Run("missing section uses zero value", func(t *testing.T) {
+		config, err := ParseConfig([]byte("units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var implementation *configurableUpper
+		factoryCalled := false
+		registry := configRegistry(t, &implementation, &factoryCalled)
+		runtime, err := New(context.Background(), "app", config, WithRegistry(registry))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.Shutdown(context.Background())
+		if implementation.Config().Prefix != "" || implementation.initPrefix != "" {
+			t.Fatalf("expected zero config, got %#v", implementation.Config())
+		}
+	})
+
+	t.Run("empty section uses zero value", func(t *testing.T) {
+		config, err := ParseConfig([]byte("units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\nweaver.test.v1.UpperService: {}\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var implementation *configurableUpper
+		factoryCalled := false
+		registry := configRegistry(t, &implementation, &factoryCalled)
+		runtime, err := New(context.Background(), "app", config, WithRegistry(registry))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.Shutdown(context.Background())
+		if implementation.Config().Prefix != "" {
+			t.Fatalf("expected zero config, got %#v", implementation.Config())
+		}
+	})
+
+	t.Run("access before injection panics", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected panic")
+			}
+		}()
+		var config WithConfig[componentSettings]
+		config.Config()
+	})
+}
+
+func TestComponentConfigValidation(t *testing.T) {
+	if _, err := ParseConfig([]byte("units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\nunknown.Service:\n  value: true\n")); err == nil || !strings.Contains(err.Error(), "未出现在 placements") {
+		t.Fatalf("expected unknown section error, got %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		section string
+		want    string
+	}{
+		{name: "unknown field", section: "  unknown: value\n", want: "field unknown not found"},
+		{name: "type mismatch", section: "  prefix: [invalid]\n", want: "cannot unmarshal"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data := "units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\nweaver.test.v1.UpperService:\n" + test.section
+			config, err := ParseConfig([]byte(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var implementation *configurableUpper
+			factoryCalled := false
+			registry := configRegistry(t, &implementation, &factoryCalled)
+			_, err = New(context.Background(), "app", config, WithRegistry(registry))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q, got %v", test.want, err)
+			}
+			if factoryCalled {
+				t.Fatal("component factory ran before config validation")
+			}
+		})
+	}
+
+	t.Run("section without declaration", func(t *testing.T) {
+		config, err := ParseConfig([]byte("units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\nweaver.test.v1.UpperService:\n  prefix: value\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		factoryCalled := false
+		registry := NewRegistry()
+		if err := registry.Register(Registration{
+			Service: upperService().Descriptor(),
+			New: func() any {
+				factoryCalled = true
+				return &upperImpl{}
+			},
+			Inject: func(any, Injector) error { return nil },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_, err = New(context.Background(), "app", config, WithRegistry(registry))
+		if err == nil || !strings.Contains(err.Error(), "未声明 WithConfig") {
+			t.Fatalf("expected missing declaration error, got %v", err)
+		}
+		if factoryCalled {
+			t.Fatal("component factory ran before config validation")
+		}
+	})
+
+	t.Run("remote section is validated", func(t *testing.T) {
+		config, err := ParseConfig([]byte("units:\n  core: http://core.invalid\n  game: ''\nplacements:\n  weaver.test.v1.UpperService: core\n  weaver.test.v1.CallerService: game\nweaver.test.v1.UpperService:\n  unknown: value\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var implementation *configurableUpper
+		factoryCalled := false
+		registry := configRegistry(t, &implementation, &factoryCalled)
+		if err := registry.Register(Registration{
+			Service: callerService().Descriptor(),
+			New: func() any {
+				factoryCalled = true
+				return &callerImpl{}
+			},
+			Inject: func(any, Injector) error { return nil },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_, err = New(context.Background(), "game", config, WithRegistry(registry))
+		if err == nil || !strings.Contains(err.Error(), "field unknown not found") {
+			t.Fatalf("expected remote config validation error, got %v", err)
+		}
+		if factoryCalled {
+			t.Fatal("component factory ran before remote config validation")
+		}
+	})
 }
 
 func TestRuntimeDirectAndRemote(t *testing.T) {
@@ -430,6 +627,12 @@ func TestResourceAndRegistrationValidation(t *testing.T) {
 	}
 	if err := registry.Register(registration); err == nil || !strings.Contains(err.Error(), "重复注册") {
 		t.Fatalf("expected duplicate implementation, got %v", err)
+	}
+
+	invalidConfigRegistry := NewRegistry()
+	registration.ConfigType = reflect.TypeFor[string]()
+	if err := invalidConfigRegistry.Register(registration); err == nil || !strings.Contains(err.Error(), "配置类型必须是结构体") {
+		t.Fatalf("expected invalid config type, got %v", err)
 	}
 }
 

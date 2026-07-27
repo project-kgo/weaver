@@ -27,15 +27,22 @@ plugins:
     opt: [paths=source_relative]
 ```
 
-业务实现只声明组件、依赖和普通资源：
+业务实现只声明组件、依赖、组件配置和普通资源：
 
 ```go
+type Settings struct {
+    Prefix string `yaml:"prefix"`
+}
+
 type echoService struct {
     weaver.Implements[examplev1weaver.EchoServiceComponent]
-    Upper  weaver.Ref[examplev1weaver.UpperServiceComponent]
-    Config weaver.Resource[*Settings]
+    weaver.WithConfig[Settings]
+    Upper    weaver.Ref[examplev1weaver.UpperServiceComponent]
+    Database weaver.Resource[*sql.DB]
 }
 ```
+
+`WithConfig[T]` 必须匿名嵌入，`T` 必须是结构体。Runtime 会在 `Init` 前注入配置，通过 `Config() *T` 访问；缺少配置段时注入零值。
 
 生成并构建：
 
@@ -74,11 +81,16 @@ units:
 placements:
   game.wallet.v1.WalletService: core
   game.table.v1.TableService: game
+
+game.wallet.v1.WalletService:
+  currency: CNY
 ```
+
+组件配置段必须使用 `placements` 中的 protobuf service 全名。配置字段支持 `yaml` 标签；未知配置段、未知字段和类型错误都会导致启动失败。
 
 `http` 和 `https` 使用内置静态 Resolver。其他 scheme 通过 `WithResolver` 注册；Resolver 返回的 `HTTPClient` 自行负责实例变化、连接池和负载均衡。Weaver 只在启动阶段解析并缓存目标。
 
-组件创建顺序为：创建全部本地实例、注入 `Resource`/`Ref`、按依赖顺序执行 `Init`、挂载当前 unit 的 Handler。关闭时按相反顺序执行 `Shutdown`。普通资源由调用方管理生命周期。
+组件创建顺序为：严格校验全部组件配置、创建全部本地实例、注入 `WithConfig`/`Resource`/`Ref`、按依赖顺序执行 `Init`、挂载当前 unit 的 Handler。关闭时按相反顺序执行 `Shutdown`。普通资源由调用方管理生命周期。
 
 ## 示例
 

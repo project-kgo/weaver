@@ -18,11 +18,11 @@ Weaver 是一个嵌入业务进程的轻量 ConnectRPC 部署感知运行时。�
 
 组件之间通过 `Ref[T]` 依赖：组件和调用方在同一 unit 时直接调用 Go 实现；位于不同 unit 时，由 Runtime 自动创建 ConnectRPC Client。业务代码不应出现 local/remote 判断。
 
-普通进程内依赖通过 `Resource[T]` 注入，例如数据库连接、配置对象和第三方 Client。资源按精确 Go 类型匹配，其创建和关闭由业务启动代码负责，Weaver 不接管资源生命周期。
+组件 YAML 配置通过匿名嵌入 `WithConfig[T]` 注入，并按 protobuf service 全名匹配配置段。普通进程内依赖通过 `Resource[T]` 注入，例如数据库连接和第三方 Client。资源按精确 Go 类型匹配，其创建和关闭由业务启动代码负责，Weaver 不接管资源生命周期。
 
 主要入口：
 
-- `component.go`：`Implements[T]`、`Ref[T]`、`Resource[T]` 和生命周期接口。
+- `component.go`：`Implements[T]`、`Ref[T]`、`WithConfig[T]`、`Resource[T]` 和生命周期接口。
 - `runtime.go`：组件创建、注入、拓扑初始化、Handler 聚合和关闭。
 - `resolver.go`：unit target 解析协议。
 - `registry.go`：生成代码使用的组件注册表。
@@ -40,7 +40,7 @@ Weaver 是一个嵌入业务进程的轻量 ConnectRPC 部署感知运行时。�
 
 1. 定义 unary protobuf service。
 2. 编写 Service 的普通 Go 实现。
-3. 使用 `Implements[T]`、`Ref[T]` 和 `Resource[T]` 声明关系。
+3. 使用 `Implements[T]`、`Ref[T]`、`WithConfig[T]` 和 `Resource[T]` 声明关系。
 
 Service 注册、字段赋值、Handler 挂载、远程 Client 创建和本地代理均由生成代码与 Runtime 完成。不要把这些基础设施逻辑重新放回业务代码。
 
@@ -57,10 +57,10 @@ Service 注册、字段赋值、Handler 挂载、远程 Client 创建和本地�
 
 ### 启动时确定，运行时保持简单
 
-- 配置只描述 `units` 与 `placements`，启动后不可变。
+- 配置描述 `units`、`placements` 和按 protobuf service 全名索引的组件配置段，启动后不可变。
 - `currentUnit` 必须由启动参数或 `APP_UNIT` 明确提供，不做自动推断。
-- Runtime 先创建当前 unit 的全部组件，再注入 `Resource` 和 `Ref`，随后按依赖拓扑执行 `Init`。
-- 循环依赖、未知组件、缺失 placement、缺失或重复资源必须在启动阶段失败。
+- Runtime 先严格校验全部组件配置，再创建当前 unit 的全部组件，注入 `WithConfig`、`Resource` 和 `Ref`，随后按依赖拓扑执行 `Init`。
+- 循环依赖、未知组件、缺失 placement、未知配置段或字段、配置类型错误、缺失或重复资源必须在启动阶段失败。
 - 初始化失败时逆序清理已经成功初始化的组件；正常退出时逆序执行 `Shutdown`。
 - Resolver 每个远程 unit 在启动期间只解析一次并缓存结果。动态实例发现和负载均衡属于 Resolver 返回的 `HTTPClient` 或 `RoundTripper`。
 
@@ -108,7 +108,7 @@ go build ./...
 
 - `protoc-gen-connect-go` 必须使用 `simple` 模式。
 - protobuf 插件只支持 unary 方法，并直接复用 Connect 生成的接口与构造函数。
-- Go 扫描器使用 `go/packages` 识别匿名嵌入的 `Implements[T]` 以及 `Ref[T]`、`Resource[T]` 字段。
+- Go 扫描器使用 `go/packages` 识别匿名嵌入的 `Implements[T]`、`WithConfig[T]` 以及 `Ref[T]`、`Resource[T]` 字段。
 - 一个 protobuf Service 只能有一个组件实现。
 - 生成文件必须提交仓库。CI 会重新生成并执行 `git diff --exit-code`。
 - 修改生成器时必须更新对应 golden test，并验证重复生成无差异、生成代码可编译。

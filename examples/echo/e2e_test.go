@@ -12,30 +12,20 @@ import (
 	"github.com/project-kgo/weaver"
 	examplev1 "github.com/project-kgo/weaver/examples/echo/gen/example/v1"
 	examplev1connect "github.com/project-kgo/weaver/examples/echo/gen/example/v1/examplev1connect"
-	"github.com/project-kgo/weaver/examples/echo/internal/app"
+	_ "github.com/project-kgo/weaver/examples/echo/internal/app"
 )
 
 func TestGeneratedCodeEndToEnd(t *testing.T) {
 	t.Run("monolith", func(t *testing.T) {
 		config := loadConfig(t, "monolith.yaml")
-		server := startUnit(
-			t,
-			"app",
-			config,
-			weaver.WithResource(&app.Settings{Prefix: "echo:"}),
-		)
+		server := startUnit(t, "app", config)
 		client := examplev1connect.NewEchoServiceClient(server.Client(), server.URL)
 		assertEchoBehavior(t, client)
 	})
 
 	t.Run("two units", func(t *testing.T) {
 		config := loadConfig(t, "microservices.yaml")
-		coreServer := startUnit(
-			t,
-			"core",
-			config,
-			weaver.WithResource(&app.Settings{Prefix: "echo:"}),
-		)
+		coreServer := startUnit(t, "core", config)
 
 		// game 启动前替换 core 地址，使 Echo -> Upper 经过真实 ConnectRPC。
 		config.Units["core"] = coreServer.URL
