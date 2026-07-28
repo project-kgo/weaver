@@ -104,10 +104,42 @@ func WithClientOptions(values ...connect.ClientOption) Option {
 	})
 }
 
+// WithClientInterceptors 设置所有跨 unit Connect client 的中间件。
+// 多次调用会按注册顺序追加；本地组件调用不会执行这些中间件。
+func WithClientInterceptors(values ...connect.Interceptor) Option {
+	return optionFunc(func(options *runtimeOptions) error {
+		for _, value := range values {
+			if value == nil || isNil(value) {
+				return fmt.Errorf("weaver: Client Interceptor 不能为空")
+			}
+		}
+		if len(values) != 0 {
+			options.clientOptions = append(options.clientOptions, connect.WithInterceptors(values...))
+		}
+		return nil
+	})
+}
+
 // WithHandlerOptions 设置当前 unit 所有 Connect handler 的传输层选项。
 func WithHandlerOptions(values ...connect.HandlerOption) Option {
 	return optionFunc(func(options *runtimeOptions) error {
 		options.handlerOptions = append(options.handlerOptions, values...)
+		return nil
+	})
+}
+
+// WithHandlerInterceptors 设置当前 unit 所有 Connect handler 的中间件。
+// 多次调用会按注册顺序追加；内置 recovery 会覆盖这些中间件中的 panic。
+func WithHandlerInterceptors(values ...connect.Interceptor) Option {
+	return optionFunc(func(options *runtimeOptions) error {
+		for _, value := range values {
+			if value == nil || isNil(value) {
+				return fmt.Errorf("weaver: Handler Interceptor 不能为空")
+			}
+		}
+		if len(values) != 0 {
+			options.handlerOptions = append(options.handlerOptions, connect.WithInterceptors(values...))
+		}
 		return nil
 	})
 }

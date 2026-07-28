@@ -94,6 +94,30 @@ game.wallet.v1.WalletService:
 
 组件创建顺序为：严格校验全部组件配置、创建全部本地实例、注入 `WithConfig`/`Resource`/`Ref`、按依赖顺序执行 `Init`、挂载当前 unit 的 Handler。关闭时按相反顺序执行 `Shutdown`。普通资源由调用方管理生命周期。
 
+## Recovery 与 OpenTelemetry
+
+Runtime 默认启用 recovery、OpenTelemetry trace 和 metric。Weaver 使用 OpenTelemetry 的全局 `TracerProvider`、`MeterProvider` 和 `TextMapPropagator`，应用应在调用 `weaver.New` 前完成配置，并自行关闭 Provider 和 Exporter；未配置时 OpenTelemetry API 保持 no-op，Weaver 不会启动独立采集或导出进程。
+
+跨 unit Connect 调用同时生成 client/server span 和标准 RPC 指标。unit 之间按内部服务处理并信任传播的 trace context，使 server span 成为 client span 的子节点；因此对外暴露 `Runtime.Handler()` 时，应用必须在外围完成可信边界、鉴权和流量隔离。服务端 peer 地址不会写入埋点，避免临时端口形成高基数。
+
+同 unit 调用由生成的本地代理直接完成 recovery 和埋点，不经过 Connect interceptor。每次调用生成一个 INTERNAL span，以及名为 `weaver.local.call.duration`、单位为秒的耗时直方图。span 和指标只使用 protobuf service、method 与有限的 Connect 结果码作为维度。
+
+组件实现或 Handler interceptor 发生 panic 时，调用方只会收到 `connect.CodeInternal`，不会看到 panic 内容。Weaver 会通过 `slog.Default()` 记录 procedure、panic 原因和堆栈，并向当前 span 写入 exception 事件；日志输出与生命周期仍由应用配置。
+
+可以分别为跨 unit Client 和当前 unit Handler 注入 Connect interceptor：
+
+```go
+runtime, err := weaver.New(
+    ctx,
+    unit,
+    config,
+    weaver.WithClientInterceptors(clientInterceptor),
+    weaver.WithHandlerInterceptors(handlerInterceptor),
+)
+```
+
+Client 调用顺序为“内置 OTel → 用户 Client interceptor → transport”，Handler 调用顺序为“内置 OTel → recovery → 用户 Handler interceptor → Service”。多次配置按传入顺序追加；用户 interceptor 不会在同 unit 本地调用中执行。需要本地与远程保持一致的鉴权、校验和领域逻辑仍应放在 Service 实现中。
+
 Connect 生成的 Handler 会在同一路径上自动接受 Connect、gRPC 和 gRPC-Web。Runtime 不接管 `http.Server`，业务启动代码需要同时启用 HTTP/1、TLS HTTP/2 和明文 HTTP/2，才能兼容普通 HTTP 调用、HTTPS gRPC 和明文 h2c gRPC：
 
 ```go
@@ -174,5 +198,6 @@ HTTPS 地址不需要 `--http2-prior-knowledge`，Client 会通过 TLS ALPN 协�
 - `Resource[T]` 按精确 Go 类型匹配，不支持命名资源和 Provider 图。
 - 组件依赖必须是无环图。
 - Connect interceptor 只处理传输层。业务校验、鉴权规则和领域错误不能只放在远程 Handler interceptor 中。
+- 自定义 Connect interceptor 只作用于跨 unit Client 或入站 Handler，不作用于同 unit 本地调用。
 - Handler 不得修改 request；组件边界始终按“可能经过网络”设计。
 - 默认跨 unit Client 只使用 HTTP/2，不自动探测或回退到 HTTP/1.1。

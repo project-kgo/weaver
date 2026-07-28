@@ -7,7 +7,7 @@ import (
 )
 
 // CodegenVersion 用于让过期的生成代码在编译期失败。
-const CodegenVersion = 2
+const CodegenVersion = 3
 
 // Implements 声明一个结构体实现了组件接口，仅供代码生成器识别。
 type Implements[T any] struct{}

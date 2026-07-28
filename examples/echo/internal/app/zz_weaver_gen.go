@@ -8,7 +8,7 @@ import (
 	reflect "reflect"
 )
 
-var _ [weaver.CodegenVersion]struct{} = [2]struct{}{}
+var _ [weaver.CodegenVersion]struct{} = [3]struct{}{}
 
 func init() {
 	weaver.MustRegister(weaver.Registration{

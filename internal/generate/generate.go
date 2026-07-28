@@ -368,7 +368,7 @@ func renderPackage(model packageModel) ([]byte, error) {
 		}
 	}
 	var body bytes.Buffer
-	body.WriteString("var _ [weaver.CodegenVersion]struct{} = [2]struct{}{}\n\n")
+	body.WriteString("var _ [weaver.CodegenVersion]struct{} = [3]struct{}{}\n\n")
 	body.WriteString("func init() {\n")
 	for _, component := range model.components {
 		renderRegistration(&body, imports, component)

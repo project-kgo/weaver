@@ -11,6 +11,8 @@ import (
 	http "net/http"
 )
 
+var _ [weaver.CodegenVersion]struct{} = [3]struct{}{}
+
 const EchoServiceName = "test.v1.EchoService"
 
 type EchoServiceComponent interface {
@@ -34,10 +36,19 @@ type echoServiceLocalClient struct {
 	implementation EchoServiceComponent
 }
 
-func (client *echoServiceLocalClient) Echo(ctx context.Context, request *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
-	response, err := client.implementation.Echo(ctx, request)
-	if err != nil {
-		return nil, weaver.NormalizeError(err)
-	}
-	return response, nil
+func (client *echoServiceLocalClient) Echo(ctx context.Context, request *wrapperspb.StringValue) (response *wrapperspb.StringValue, err error) {
+	ctx, call := weaver.BeginLocalCall(ctx, "/test.v1.EchoService/Echo")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			response = nil
+			err = weaver.RecoverPanic(ctx, "/test.v1.EchoService/Echo", recovered)
+		}
+		err = weaver.NormalizeError(err)
+		if err != nil {
+			response = nil
+		}
+		call.End(err)
+	}()
+	response, err = client.implementation.Echo(ctx, request)
+	return response, err
 }

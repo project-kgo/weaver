@@ -69,6 +69,9 @@ func (u *upperImpl) Upper(ctx context.Context, request *wrapperspb.StringValue) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if request.Value == "panic" {
+		panic("upper panic")
+	}
 	if request.Value == "error" {
 		return nil, errors.New("ordinary failure")
 	}
@@ -126,16 +129,40 @@ func (c *callerRemoteClient) Call(ctx context.Context, request *wrapperspb.Strin
 
 type upperLocalClient struct{ implementation upperAPI }
 
-func (c upperLocalClient) Upper(ctx context.Context, request *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
-	response, err := c.implementation.Upper(ctx, request)
-	return response, NormalizeError(err)
+func (c upperLocalClient) Upper(ctx context.Context, request *wrapperspb.StringValue) (response *wrapperspb.StringValue, err error) {
+	ctx, call := BeginLocalCall(ctx, upperProcedure)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			response = nil
+			err = RecoverPanic(ctx, upperProcedure, recovered)
+		}
+		err = NormalizeError(err)
+		if err != nil {
+			response = nil
+		}
+		call.End(err)
+	}()
+	response, err = c.implementation.Upper(ctx, request)
+	return response, err
 }
 
 type callerLocalClient struct{ implementation callerAPI }
 
-func (c callerLocalClient) Call(ctx context.Context, request *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
-	response, err := c.implementation.Call(ctx, request)
-	return response, NormalizeError(err)
+func (c callerLocalClient) Call(ctx context.Context, request *wrapperspb.StringValue) (response *wrapperspb.StringValue, err error) {
+	ctx, call := BeginLocalCall(ctx, callerProcedure)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			response = nil
+			err = RecoverPanic(ctx, callerProcedure, recovered)
+		}
+		err = NormalizeError(err)
+		if err != nil {
+			response = nil
+		}
+		call.End(err)
+	}()
+	response, err = c.implementation.Call(ctx, request)
+	return response, err
 }
 
 func upperService() Service[upperAPI] {

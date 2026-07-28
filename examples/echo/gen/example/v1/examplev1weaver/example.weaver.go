@@ -11,6 +11,8 @@ import (
 	http "net/http"
 )
 
+var _ [weaver.CodegenVersion]struct{} = [3]struct{}{}
+
 const UpperServiceName = "weaver.example.v1.UpperService"
 
 type UpperServiceComponent interface {
@@ -34,12 +36,21 @@ type upperServiceLocalClient struct {
 	implementation UpperServiceComponent
 }
 
-func (client *upperServiceLocalClient) Upper(ctx context.Context, request *v1.UpperRequest) (*v1.UpperResponse, error) {
-	response, err := client.implementation.Upper(ctx, request)
-	if err != nil {
-		return nil, weaver.NormalizeError(err)
-	}
-	return response, nil
+func (client *upperServiceLocalClient) Upper(ctx context.Context, request *v1.UpperRequest) (response *v1.UpperResponse, err error) {
+	ctx, call := weaver.BeginLocalCall(ctx, "/weaver.example.v1.UpperService/Upper")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			response = nil
+			err = weaver.RecoverPanic(ctx, "/weaver.example.v1.UpperService/Upper", recovered)
+		}
+		err = weaver.NormalizeError(err)
+		if err != nil {
+			response = nil
+		}
+		call.End(err)
+	}()
+	response, err = client.implementation.Upper(ctx, request)
+	return response, err
 }
 
 const EchoServiceName = "weaver.example.v1.EchoService"
@@ -65,10 +76,19 @@ type echoServiceLocalClient struct {
 	implementation EchoServiceComponent
 }
 
-func (client *echoServiceLocalClient) Echo(ctx context.Context, request *v1.EchoRequest) (*v1.EchoResponse, error) {
-	response, err := client.implementation.Echo(ctx, request)
-	if err != nil {
-		return nil, weaver.NormalizeError(err)
-	}
-	return response, nil
+func (client *echoServiceLocalClient) Echo(ctx context.Context, request *v1.EchoRequest) (response *v1.EchoResponse, err error) {
+	ctx, call := weaver.BeginLocalCall(ctx, "/weaver.example.v1.EchoService/Echo")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			response = nil
+			err = weaver.RecoverPanic(ctx, "/weaver.example.v1.EchoService/Echo", recovered)
+		}
+		err = weaver.NormalizeError(err)
+		if err != nil {
+			response = nil
+		}
+		call.End(err)
+	}()
+	response, err = client.implementation.Echo(ctx, request)
+	return response, err
 }

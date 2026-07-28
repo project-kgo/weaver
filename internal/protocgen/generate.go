@@ -47,6 +47,8 @@ func generateFile(plugin *protogen.Plugin, file *protogen.File) {
 	generated.P()
 	generated.P("package ", packageName)
 	generated.P()
+	generated.P("var _ [", generated.QualifiedGoIdent(weaverImportPath.Ident("CodegenVersion")), "]struct{} = [3]struct{}{}")
+	generated.P()
 
 	for _, service := range file.Services {
 		generateService(generated, service, connectPackagePath)
@@ -86,12 +88,22 @@ func generateService(generated *protogen.GeneratedFile, service *protogen.Servic
 	generated.P()
 
 	for _, method := range service.Methods {
-		generated.P("func (client *", localClientName, ") ", method.GoName, "(ctx ", generated.QualifiedGoIdent(contextImportPath.Ident("Context")), ", request *", generated.QualifiedGoIdent(method.Input.GoIdent), ") (*", generated.QualifiedGoIdent(method.Output.GoIdent), ", error) {")
-		generated.P("response, err := client.implementation.", method.GoName, "(ctx, request)")
-		generated.P("if err != nil {")
-		generated.P("return nil, ", generated.QualifiedGoIdent(weaverImportPath.Ident("NormalizeError")), "(err)")
+		procedure := fmt.Sprintf("/%s/%s", service.Desc.FullName(), method.Desc.Name())
+		generated.P("func (client *", localClientName, ") ", method.GoName, "(ctx ", generated.QualifiedGoIdent(contextImportPath.Ident("Context")), ", request *", generated.QualifiedGoIdent(method.Input.GoIdent), ") (response *", generated.QualifiedGoIdent(method.Output.GoIdent), ", err error) {")
+		generated.P("ctx, call := ", generated.QualifiedGoIdent(weaverImportPath.Ident("BeginLocalCall")), "(ctx, ", fmt.Sprintf("%q", procedure), ")")
+		generated.P("defer func() {")
+		generated.P("if recovered := recover(); recovered != nil {")
+		generated.P("response = nil")
+		generated.P("err = ", generated.QualifiedGoIdent(weaverImportPath.Ident("RecoverPanic")), "(ctx, ", fmt.Sprintf("%q", procedure), ", recovered)")
 		generated.P("}")
-		generated.P("return response, nil")
+		generated.P("err = ", generated.QualifiedGoIdent(weaverImportPath.Ident("NormalizeError")), "(err)")
+		generated.P("if err != nil {")
+		generated.P("response = nil")
+		generated.P("}")
+		generated.P("call.End(err)")
+		generated.P("}()")
+		generated.P("response, err = client.implementation.", method.GoName, "(ctx, request)")
+		generated.P("return response, err")
 		generated.P("}")
 		generated.P()
 	}

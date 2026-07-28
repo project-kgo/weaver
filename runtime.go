@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 
+	"connectrpc.com/connect"
+	"connectrpc.com/otelconnect"
 	"gopkg.in/yaml.v3"
 )
 
@@ -54,6 +56,26 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 			return nil, err
 		}
 	}
+	telemetryInterceptor, err := otelconnect.NewInterceptor(
+		otelconnect.WithTrustRemote(),
+		otelconnect.WithoutServerPeerAttributes(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("weaver: 创建 OpenTelemetry 中间件失败: %w", err)
+	}
+	options.clientOptions = append(
+		[]connect.ClientOption{connect.WithInterceptors(telemetryInterceptor)},
+		options.clientOptions...,
+	)
+	options.handlerOptions = append(
+		[]connect.HandlerOption{
+			connect.WithInterceptors(telemetryInterceptor),
+			connect.WithRecover(func(ctx context.Context, spec connect.Spec, _ http.Header, recovered any) error {
+				return RecoverPanic(ctx, spec.Procedure, recovered)
+			}),
+		},
+		options.handlerOptions...,
+	)
 	options.resolvers["http"] = staticResolver{client: options.httpClient}
 	options.resolvers["https"] = staticResolver{client: options.httpClient}
 
