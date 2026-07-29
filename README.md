@@ -98,6 +98,23 @@ game.wallet.v1.WalletService:
 
 Runtime 默认启用 recovery、OpenTelemetry trace 和 metric。Weaver 使用 OpenTelemetry 的全局 `TracerProvider`、`MeterProvider` 和 `TextMapPropagator`，应用应在调用 `weaver.New` 前完成配置，并自行关闭 Provider 和 Exporter；未配置时 OpenTelemetry API 保持 no-op，Weaver 不会启动独立采集或导出进程。
 
+可以使用 `NewTracerProvider` 创建常规 OpenTelemetry SDK Provider，并通过原生 SDK 选项配置 exporter、Resource 或覆盖采样器。默认采样器平均每秒采样一条由当前进程发起的根 trace，子 span 跟随父 span 的采样决定：
+
+```go
+tracerProvider := weaver.NewTracerProvider(
+    sdktrace.WithBatcher(exporter),
+    sdktrace.WithResource(serviceResource),
+)
+otel.SetTracerProvider(tracerProvider)
+otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+    propagation.TraceContext{},
+    propagation.Baggage{},
+))
+defer tracerProvider.Shutdown(context.Background())
+```
+
+业务可以传入 `sdktrace.WithSampler` 覆盖默认采样策略。Provider 只负责 trace，MeterProvider、Propagator、Exporter 的创建和关闭仍由应用负责。
+
 跨 unit Connect 调用同时生成 client/server span 和标准 RPC 指标。unit 之间按内部服务处理并信任传播的 trace context，使 server span 成为 client span 的子节点；因此对外暴露 `Runtime.Handler()` 时，应用必须在外围完成可信边界、鉴权和流量隔离。服务端 peer 地址不会写入埋点，避免临时端口形成高基数。
 
 同 unit 调用由生成的本地代理直接完成 recovery 和埋点，不经过 Connect interceptor。每次调用生成一个 INTERNAL span，以及名为 `weaver.local.call.duration`、单位为秒的耗时直方图。span 和指标只使用 protobuf service、method 与有限的 Connect 结果码作为维度。
