@@ -2,6 +2,7 @@ package weaver
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -18,6 +19,8 @@ func (s *slogHandler) Handle(ctx context.Context, r slog.Record) error {
 	if spanContext.IsValid() {
 		r.AddAttrs(slog.String("trace_id", spanContext.TraceID().String()))
 	}
+	src := r.Source()
+	r.AddAttrs(slog.String(slog.SourceKey, fmt.Sprintf("%s:%s", src.File, src.Line)))
 	return s.Handler.Handle(ctx, r)
 }
 
