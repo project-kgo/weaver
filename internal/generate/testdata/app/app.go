@@ -31,3 +31,11 @@ type echo struct {
 func (e *echo) Echo(ctx context.Context, value string) (string, error) {
 	return e.Upper.Get().Upper(ctx, value)
 }
+
+type standalone struct {
+	weaver.Implements[components.StandaloneComponent]
+}
+
+func (*standalone) Standalone(context.Context) error {
+	return nil
+}

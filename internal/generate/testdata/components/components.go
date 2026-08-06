@@ -16,6 +16,10 @@ type EchoComponent interface {
 	Echo(context.Context, string) (string, error)
 }
 
+type StandaloneComponent interface {
+	Standalone(context.Context) error
+}
+
 var Upper = weaver.Service[UpperComponent]{
 	Name:       "test.v1.Upper",
 	NewLocal:   func(value UpperComponent) UpperComponent { return value },
@@ -28,4 +32,11 @@ var Echo = weaver.Service[EchoComponent]{
 	NewLocal:   func(value EchoComponent) EchoComponent { return value },
 	NewRemote:  func(connect.HTTPClient, string, ...connect.ClientOption) EchoComponent { return nil },
 	NewHandler: func(EchoComponent, ...connect.HandlerOption) (string, http.Handler) { return "", nil },
+}
+
+var Standalone = weaver.Service[StandaloneComponent]{
+	Name:       "test.v1.Standalone",
+	NewLocal:   func(value StandaloneComponent) StandaloneComponent { return value },
+	NewRemote:  func(connect.HTTPClient, string, ...connect.ClientOption) StandaloneComponent { return nil },
+	NewHandler: func(StandaloneComponent, ...connect.HandlerOption) (string, http.Handler) { return "", nil },
 }

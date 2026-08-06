@@ -414,7 +414,9 @@ func renderRegistration(output *bytes.Buffer, imports *importManager, component 
 	}
 	fmt.Fprintf(output, "\t\tNew: func() any { return new(%s) },\n", component.implementation)
 	fmt.Fprintln(output, "\t\tInject: func(target any, injector weaver.Injector) error {")
-	fmt.Fprintf(output, "\t\t\tcomponent := target.(*%s)\n", component.implementation)
+	if len(component.refs) != 0 || len(component.resources) != 0 || component.config != nil {
+		fmt.Fprintf(output, "\t\t\tcomponent := target.(*%s)\n", component.implementation)
+	}
 	for index, field := range component.refs {
 		typeName := types.TypeString(field.valueType, imports.qualifier)
 		dependency := imports.descriptor(field.descriptor)

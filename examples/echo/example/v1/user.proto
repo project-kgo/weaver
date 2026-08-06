@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package weaver.example.v1;
+
+option go_package = "github.com/project-kgo/weaver/examples/echo/gen/example/v1;examplev1";
+
+service LoginService {
+  rpc Login(LoginRequest) returns (LoginResponse);
+}
+
+
+message LoginRequest {
+  string value = 1;
+}
+
+message LoginResponse {
+  string token = 1;
+}

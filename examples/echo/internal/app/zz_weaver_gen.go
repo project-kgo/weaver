@@ -41,7 +41,15 @@ func init() {
 			return nil
 		},
 	})
+	weaver.MustRegister(weaver.Registration{
+		Service: examplev1weaver.LoginService.Descriptor(),
+		New:     func() any { return new(userService) },
+		Inject: func(target any, injector weaver.Injector) error {
+			return nil
+		},
+	})
 }
 
 var _ examplev1weaver.EchoServiceComponent = (*echoService)(nil)
 var _ examplev1weaver.UpperServiceComponent = (*upperService)(nil)
+var _ examplev1weaver.LoginServiceComponent = (*userService)(nil)

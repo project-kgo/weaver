@@ -29,6 +29,13 @@ func init() {
 		},
 	})
 	weaver.MustRegister(weaver.Registration{
+		Service: components.Standalone.Descriptor(),
+		New:     func() any { return new(standalone) },
+		Inject: func(target any, injector weaver.Injector) error {
+			return nil
+		},
+	})
+	weaver.MustRegister(weaver.Registration{
 		Service:    components.Upper.Descriptor(),
 		ConfigType: reflect.TypeFor[upperConfig](),
 		New:        func() any { return new(upper) },
@@ -50,4 +57,5 @@ func init() {
 }
 
 var _ components.EchoComponent = (*echo)(nil)
+var _ components.StandaloneComponent = (*standalone)(nil)
 var _ components.UpperComponent = (*upper)(nil)
