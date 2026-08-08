@@ -20,7 +20,7 @@ func (s *slogHandler) Handle(ctx context.Context, r slog.Record) error {
 		r.AddAttrs(slog.String("trace_id", spanContext.TraceID().String()))
 	}
 	src := r.Source()
-	r.AddAttrs(slog.String(slog.SourceKey, fmt.Sprintf("%s:%s", src.File, src.Line)))
+	r.AddAttrs(slog.String(slog.SourceKey, fmt.Sprintf("%s:%d", src.File, src.Line)))
 	return s.Handler.Handle(ctx, r)
 }
 
