@@ -1,6 +1,7 @@
 package weaver
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -26,7 +27,11 @@ type runtimeOptions struct {
 	httpClient     connect.HTTPClient
 	clientOptions  []connect.ClientOption
 	handlerOptions []connect.HandlerOption
+	shutdownHooks  []ShutdownHook
 }
+
+// ShutdownHook 是 Runtime 关闭组件后执行的外部清理函数。
+type ShutdownHook func(context.Context) error
 
 func newRuntimeOptions() runtimeOptions {
 	return runtimeOptions{
@@ -140,6 +145,18 @@ func WithHandlerInterceptors(values ...connect.Interceptor) Option {
 		if len(values) != 0 {
 			options.handlerOptions = append(options.handlerOptions, connect.WithInterceptors(values...))
 		}
+		return nil
+	})
+}
+
+// WithShutdownHook 注册外部关闭回调。
+// 多次注册的回调会在组件全部关闭后，按注册顺序的逆序执行。
+func WithShutdownHook(hook ShutdownHook) Option {
+	return optionFunc(func(options *runtimeOptions) error {
+		if hook == nil {
+			return fmt.Errorf("weaver: ShutdownHook 不能为空")
+		}
+		options.shutdownHooks = append(options.shutdownHooks, hook)
 		return nil
 	})
 }

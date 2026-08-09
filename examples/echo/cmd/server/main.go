@@ -2,15 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/project-kgo/weaver"
 	_ "github.com/project-kgo/weaver/examples/echo/internal/app"
@@ -37,37 +32,5 @@ func run() error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	runtime, err := weaver.New(ctx, *unit, config)
-	if err != nil {
-		return err
-	}
-
-	protocols := new(http.Protocols)
-	protocols.SetHTTP1(true)
-	protocols.SetHTTP2(true)
-	protocols.SetUnencryptedHTTP2(true)
-	server := &http.Server{
-		Addr:              *listenAddress,
-		Handler:           runtime.Handler(),
-		Protocols:         protocols,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	serveError := make(chan error, 1)
-	go func() {
-		serveError <- server.ListenAndServe()
-	}()
-
-	select {
-	case <-ctx.Done():
-	case err := <-serveError:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return errors.Join(server.Shutdown(shutdownCtx), runtime.Shutdown(shutdownCtx))
+	return weaver.Serve(context.Background(), *unit, config, *listenAddress)
 }

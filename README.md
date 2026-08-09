@@ -135,20 +135,28 @@ runtime, err := weaver.New(
 
 Client 调用顺序为“内置 OTel → 用户 Client interceptor → transport”，Handler 调用顺序为“内置 OTel → recovery → 用户 Handler interceptor → Service”。多次配置按传入顺序追加；用户 interceptor 不会在同 unit 本地调用中执行。需要本地与远程保持一致的鉴权、校验和领域逻辑仍应放在 Service 实现中。
 
-Connect 生成的 Handler 会在同一路径上自动接受 Connect、gRPC 和 gRPC-Web。Runtime 不接管 `http.Server`，业务启动代码需要同时启用 HTTP/1、TLS HTTP/2 和明文 HTTP/2，才能兼容普通 HTTP 调用、HTTPS gRPC 和明文 h2c gRPC：
+Connect 生成的 Handler 会在同一路径上自动接受 Connect、gRPC 和 gRPC-Web。默认可通过 `Serve` 启动同时支持 HTTP/1、HTTP/2 和明文 h2c 的服务。在 Unix 系统上，`Serve` 会监听 `SIGINT`、`SIGTERM`、`SIGHUP` 和 `SIGQUIT`；收到退出信号或 `ctx` 结束后，依次优雅关闭 HTTP 服务和 Runtime：
 
 ```go
-protocols := new(http.Protocols)
-protocols.SetHTTP1(true)
-protocols.SetHTTP2(true)
-protocols.SetUnencryptedHTTP2(true)
-
-server := &http.Server{
-    Addr:      ":8080",
-    Handler:   runtime.Handler(),
-    Protocols: protocols,
-}
+err := weaver.Serve(ctx, unit, config, ":8080", options...)
 ```
+
+通过 `WithShutdownHook` 可以注册数据库等外部资源的清理逻辑。组件会先按依赖逆序关闭，随后多个 hook 按注册顺序的逆序执行；所有关闭错误都会合并返回：
+
+```go
+err := weaver.Serve(
+    ctx,
+    unit,
+    config,
+    ":8080",
+    weaver.WithResource(database),
+    weaver.WithShutdownHook(func(context.Context) error {
+        return database.Close()
+    }),
+)
+```
+
+需要自定义 TLS、超时或外围 Handler 时，仍可使用 `weaver.New` 获取 `Runtime.Handler()` 并自行管理 `http.Server`。
 
 ## 示例
 

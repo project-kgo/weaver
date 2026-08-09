@@ -163,7 +163,8 @@ func (r *Runtime) Handler() http.Handler {
 	return r.handler
 }
 
-// Shutdown 幂等关闭组件；普通资源的生命周期仍由调用方负责。
+// Shutdown 幂等关闭组件，随后执行通过 WithShutdownHook 注册的外部关闭回调。
+// 未注册关闭回调的普通资源仍由调用方管理生命周期。
 func (r *Runtime) Shutdown(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("weaver: context 不能为空")
@@ -174,7 +175,7 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	r.shutdown = true
-	return r.shutdownComponents(ctx)
+	return errors.Join(r.shutdownComponents(ctx), r.runShutdownHooks(ctx))
 }
 
 func (r *Runtime) shutdownComponents(ctx context.Context) error {
@@ -185,6 +186,15 @@ func (r *Runtime) shutdownComponents(ctx context.Context) error {
 		}
 	}
 	r.shutdownOrder = nil
+	return result
+}
+
+func (r *Runtime) runShutdownHooks(ctx context.Context) error {
+	var result error
+	for index := len(r.options.shutdownHooks) - 1; index >= 0; index-- {
+		result = errors.Join(result, r.options.shutdownHooks[index](ctx))
+	}
+	r.options.shutdownHooks = nil
 	return result
 }
 
