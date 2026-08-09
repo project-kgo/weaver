@@ -3,6 +3,7 @@ package weaver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -227,6 +228,16 @@ func trustTestServer(t *testing.T, client connect.HTTPClient, server *httptest.S
 	return &http.Client{Transport: trustedTransport}
 }
 
+type handlerHTTPClient struct {
+	handler http.Handler
+}
+
+func (c handlerHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	c.handler.ServeHTTP(recorder, request)
+	return recorder.Result(), nil
+}
+
 func testRegistry(t *testing.T, events *[]string, upperResult **upperImpl, callerResult **callerImpl) *Registry {
 	t.Helper()
 	registry := NewRegistry()
@@ -378,6 +389,181 @@ func TestDefaultHTTPClientUsesHTTP2(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandlerInterceptorResolvesSameComponentAsRef(t *testing.T) {
+	prefix := "prefix:"
+	var lifecycle []string
+	var upper *upperImpl
+	var caller *callerImpl
+	registry := testRegistry(t, &lifecycle, &upper, &caller)
+	config := Config{
+		Units:      map[string]string{"app": ""},
+		Placements: map[string]string{upperServiceName: "app", callerServiceName: "app"},
+	}
+	recorder := newInterceptorRecorder()
+	var resolved upperAPI
+	factoryCalls := 0
+	runtime, err := New(
+		context.Background(),
+		"app",
+		config,
+		WithRegistry(registry),
+		WithResource(&prefix),
+		WithHandlerInterceptors(recorder.interceptor("before")),
+		WithHandlerInterceptor[upperAPI](func(component upperAPI) connect.Interceptor {
+			factoryCalls++
+			resolved = component
+			return connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+				return func(ctx context.Context, request connect.AnyRequest) (connect.AnyResponse, error) {
+					recorder.add("component:before")
+					response, err := component.Upper(ctx, wrapperspb.String("probe"))
+					if err != nil {
+						return nil, err
+					}
+					if response.Value != "prefix:PROBE" {
+						return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("组件返回 %q", response.Value))
+					}
+					result, err := next(ctx, request)
+					recorder.add("component:after")
+					return result, err
+				}
+			})
+		}),
+		WithHandlerInterceptors(recorder.interceptor("after")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+
+	if factoryCalls != 1 {
+		t.Fatalf("interceptor factory called %d times", factoryCalls)
+	}
+	if resolved != caller.upper.Get() {
+		t.Fatalf("interceptor and Ref received different proxies: %T != %T", resolved, caller.upper.Get())
+	}
+
+	client := connect.NewClient[wrapperspb.StringValue, wrapperspb.StringValue](
+		handlerHTTPClient{handler: runtime.Handler()},
+		"http://weaver.local"+callerProcedure,
+	)
+	response, err := client.CallUnary(context.Background(), connect.NewRequest(wrapperspb.String("hello")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Msg.Value != "prefix:HELLO" {
+		t.Fatalf("unexpected response %q", response.Msg.Value)
+	}
+	want := []string{
+		"before:before", "component:before", "after:before",
+		"after:after", "component:after", "before:after",
+	}
+	if got := recorder.values(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected interceptor order:\nwant %v\n got %v", want, got)
+	}
+}
+
+func TestHandlerInterceptorResolvesSameRemoteComponentAsRef(t *testing.T) {
+	var lifecycle []string
+	var unusedUpper *upperImpl
+	var caller *callerImpl
+	registry := testRegistry(t, &lifecycle, &unusedUpper, &caller)
+	config := Config{
+		Units:      map[string]string{"core": "http://unused.invalid", "game": ""},
+		Placements: map[string]string{upperServiceName: "core", callerServiceName: "game"},
+	}
+	var resolved upperAPI
+	runtime, err := New(
+		context.Background(),
+		"game",
+		config,
+		WithRegistry(registry),
+		WithHandlerInterceptor[upperAPI](func(component upperAPI) connect.Interceptor {
+			resolved = component
+			return connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+				return next
+			})
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+
+	if resolved != caller.upper.Get() {
+		t.Fatalf("interceptor and Ref received different remote proxies: %T != %T", resolved, caller.upper.Get())
+	}
+}
+
+type missingComponent interface {
+	Missing(context.Context) error
+}
+
+func TestHandlerInterceptorComponentValidation(t *testing.T) {
+	t.Run("nil factory", func(t *testing.T) {
+		var factory func(upperAPI) connect.Interceptor
+		options := newRuntimeOptions()
+		if err := WithHandlerInterceptor(factory).apply(&options); err == nil || !strings.Contains(err.Error(), "工厂不能为空") {
+			t.Fatalf("expected nil factory error, got %v", err)
+		}
+	})
+
+	t.Run("unregistered component", func(t *testing.T) {
+		var lifecycle []string
+		var upper *upperImpl
+		var caller *callerImpl
+		registry := testRegistry(t, &lifecycle, &upper, &caller)
+		config := Config{
+			Units:      map[string]string{"app": ""},
+			Placements: map[string]string{upperServiceName: "app", callerServiceName: "app"},
+		}
+		_, err := New(
+			context.Background(),
+			"app",
+			config,
+			WithRegistry(registry),
+			WithHandlerInterceptor[missingComponent](func(missingComponent) connect.Interceptor {
+				return newInterceptorRecorder().interceptor("missing")
+			}),
+		)
+		if err == nil || !strings.Contains(err.Error(), "没有注册组件类型") {
+			t.Fatalf("expected unregistered component error, got %v", err)
+		}
+		if len(lifecycle) != 0 {
+			t.Fatalf("component validation happened after initialization: %v", lifecycle)
+		}
+	})
+
+	t.Run("nil interceptor", func(t *testing.T) {
+		prefix := "x:"
+		var lifecycle []string
+		var upper *upperImpl
+		var caller *callerImpl
+		registry := testRegistry(t, &lifecycle, &upper, &caller)
+		config := Config{
+			Units:      map[string]string{"app": ""},
+			Placements: map[string]string{upperServiceName: "app", callerServiceName: "app"},
+		}
+		_, err := New(
+			context.Background(),
+			"app",
+			config,
+			WithRegistry(registry),
+			WithResource(&prefix),
+			WithHandlerInterceptor[upperAPI](func(upperAPI) connect.Interceptor {
+				var interceptor connect.UnaryInterceptorFunc
+				return interceptor
+			}),
+		)
+		if err == nil || !strings.Contains(err.Error(), "工厂返回 nil") {
+			t.Fatalf("expected nil interceptor error, got %v", err)
+		}
+		want := []string{"upper:init", "caller:init", "caller:shutdown", "upper:shutdown"}
+		if !reflect.DeepEqual(lifecycle, want) {
+			t.Fatalf("unexpected lifecycle rollback: %v", lifecycle)
+		}
+	})
 }
 
 func TestDefaultHTTPClientDoesNotFallbackToHTTP1(t *testing.T) {

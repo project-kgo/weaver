@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 
 	"connectrpc.com/connect"
 )
@@ -19,16 +20,18 @@ type Service[T any] struct {
 
 // ServiceDescriptor 是 Runtime 使用的类型擦除描述。
 type ServiceDescriptor struct {
-	name       string
-	newLocal   func(any) (any, error)
-	newRemote  func(connect.HTTPClient, string, ...connect.ClientOption) (any, error)
-	newHandler func(any, ...connect.HandlerOption) (string, http.Handler, error)
+	componentType reflect.Type
+	name          string
+	newLocal      func(any) (any, error)
+	newRemote     func(connect.HTTPClient, string, ...connect.ClientOption) (any, error)
+	newHandler    func(any, ...connect.HandlerOption) (string, http.Handler, error)
 }
 
 // Descriptor 将生成的强类型描述转换为 Runtime 描述。
 func (s Service[T]) Descriptor() ServiceDescriptor {
 	return ServiceDescriptor{
-		name: s.Name,
+		componentType: reflect.TypeFor[T](),
+		name:          s.Name,
 		newLocal: func(implementation any) (any, error) {
 			typed, ok := implementation.(T)
 			if !ok {

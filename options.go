@@ -26,8 +26,15 @@ type runtimeOptions struct {
 	resolvers      map[string]Resolver
 	httpClient     connect.HTTPClient
 	clientOptions  []connect.ClientOption
-	handlerOptions []connect.HandlerOption
+	handlerOptions []handlerOption
 	shutdownHooks  []ShutdownHook
+}
+
+// handlerOption 延迟需要组件代理的 Handler 配置，确保它与普通配置保持注册顺序。
+type handlerOption struct {
+	value          connect.HandlerOption
+	componentType  reflect.Type
+	newInterceptor func(any) (connect.Interceptor, error)
 }
 
 // ShutdownHook 是 Runtime 关闭组件后执行的外部清理函数。
@@ -128,7 +135,9 @@ func WithClientInterceptors(values ...connect.Interceptor) Option {
 // WithHandlerOptions 设置当前 unit 所有 Connect handler 的传输层选项。
 func WithHandlerOptions(values ...connect.HandlerOption) Option {
 	return optionFunc(func(options *runtimeOptions) error {
-		options.handlerOptions = append(options.handlerOptions, values...)
+		for _, value := range values {
+			options.handlerOptions = append(options.handlerOptions, handlerOption{value: value})
+		}
 		return nil
 	})
 }
@@ -143,8 +152,35 @@ func WithHandlerInterceptors(values ...connect.Interceptor) Option {
 			}
 		}
 		if len(values) != 0 {
-			options.handlerOptions = append(options.handlerOptions, connect.WithInterceptors(values...))
+			options.handlerOptions = append(options.handlerOptions, handlerOption{value: connect.WithInterceptors(values...)})
 		}
+		return nil
+	})
+}
+
+// WithHandlerInterceptor 创建一个可使用组件代理的 Handler 中间件。
+// T 必须是已注册的组件接口；传给 factory 的值与 Ref[T] 使用相同的本地或远程代理。
+// factory 在所有本地组件初始化完成后执行一次。
+func WithHandlerInterceptor[T any](factory func(T) connect.Interceptor) Option {
+	componentType := reflect.TypeFor[T]()
+	return optionFunc(func(options *runtimeOptions) error {
+		if factory == nil {
+			return fmt.Errorf("weaver: Handler Interceptor 工厂不能为空")
+		}
+		options.handlerOptions = append(options.handlerOptions, handlerOption{
+			componentType: componentType,
+			newInterceptor: func(value any) (connect.Interceptor, error) {
+				component, ok := value.(T)
+				if !ok {
+					return nil, fmt.Errorf("weaver: 组件代理类型 %T 无法赋给 %v", value, componentType)
+				}
+				interceptor := factory(component)
+				if interceptor == nil || isNil(interceptor) {
+					return nil, fmt.Errorf("weaver: Handler Interceptor 工厂返回 nil")
+				}
+				return interceptor, nil
+			},
+		})
 		return nil
 	})
 }

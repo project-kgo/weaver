@@ -135,6 +135,16 @@ runtime, err := weaver.New(
 
 Client 调用顺序为“内置 OTel → 用户 Client interceptor → transport”，Handler 调用顺序为“内置 OTel → recovery → 用户 Handler interceptor → Service”。多次配置按传入顺序追加；用户 interceptor 不会在同 unit 本地调用中执行。需要本地与远程保持一致的鉴权、校验和领域逻辑仍应放在 Service 实现中。
 
+Handler interceptor 需要调用组件时，可以按组件接口类型延迟创建。工厂收到的组件与 `Ref[T]` 一样：同 unit 时是本地代理，跨 unit 时是远程 Client，并复用 Runtime 中的同一个代理对象：
+
+```go
+weaver.WithHandlerInterceptor[examplev1weaver.LoginServiceComponent](
+    func(login examplev1weaver.LoginServiceComponent) connect.Interceptor {
+        return newAuthInterceptor(login)
+    },
+)
+```
+
 Connect 生成的 Handler 会在同一路径上自动接受 Connect、gRPC 和 gRPC-Web。默认可通过 `Serve` 启动同时支持 HTTP/1、HTTP/2 和明文 h2c 的服务。在 Unix 系统上，`Serve` 会监听 `SIGINT`、`SIGTERM`、`SIGHUP` 和 `SIGQUIT`；收到退出信号或 `ctx` 结束后，依次优雅关闭 HTTP 服务和 Runtime：
 
 ```go

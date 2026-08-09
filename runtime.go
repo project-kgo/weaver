@@ -68,15 +68,12 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 		[]connect.ClientOption{connect.WithInterceptors(telemetryInterceptor)},
 		options.clientOptions...,
 	)
-	options.handlerOptions = append(
-		[]connect.HandlerOption{
-			connect.WithInterceptors(telemetryInterceptor),
-			connect.WithRecover(func(ctx context.Context, spec connect.Spec, _ http.Header, recovered any) error {
-				return RecoverPanic(ctx, spec.Procedure, recovered)
-			}),
-		},
-		options.handlerOptions...,
-	)
+	builtinHandlerOptions := []connect.HandlerOption{
+		connect.WithInterceptors(telemetryInterceptor),
+		connect.WithRecover(func(ctx context.Context, spec connect.Spec, _ http.Header, recovered any) error {
+			return RecoverPanic(ctx, spec.Procedure, recovered)
+		}),
+	}
 	options.resolvers["http"] = staticResolver{client: options.httpClient}
 	options.resolvers["https"] = staticResolver{client: options.httpClient}
 
@@ -94,6 +91,9 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 	}
 	order, err := runtime.validateAndOrder()
 	if err != nil {
+		return nil, err
+	}
+	if err := runtime.validateHandlerOptions(); err != nil {
 		return nil, err
 	}
 	if err := runtime.decodeComponentConfigs(order); err != nil {
@@ -136,6 +136,12 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 		runtime.shutdownOrder = append(runtime.shutdownOrder, instance)
 	}
 
+	handlerOptions, err := runtime.buildHandlerOptions(builtinHandlerOptions)
+	if err != nil {
+		cleanupErr := runtime.shutdownComponents(context.WithoutCancel(ctx))
+		return nil, errors.Join(err, cleanupErr)
+	}
+
 	mux := http.NewServeMux()
 	paths := make(map[string]string)
 	for _, name := range order {
@@ -143,7 +149,7 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 		if !local {
 			continue
 		}
-		path, handler, err := runtime.registrations[name].Service.newHandler(instance, options.handlerOptions...)
+		path, handler, err := runtime.registrations[name].Service.newHandler(instance, handlerOptions...)
 		if err != nil {
 			cleanupErr := runtime.shutdownComponents(context.WithoutCancel(ctx))
 			return nil, errors.Join(err, cleanupErr)
@@ -157,6 +163,61 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 	}
 	runtime.handler = mux
 	return runtime, nil
+}
+
+func (r *Runtime) validateHandlerOptions() error {
+	for _, option := range r.options.handlerOptions {
+		if option.componentType == nil {
+			continue
+		}
+		if _, err := r.componentName(option.componentType); err != nil {
+			return fmt.Errorf("weaver: 配置 Handler Interceptor 失败: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) buildHandlerOptions(builtin []connect.HandlerOption) ([]connect.HandlerOption, error) {
+	result := append([]connect.HandlerOption(nil), builtin...)
+	for _, option := range r.options.handlerOptions {
+		if option.componentType == nil {
+			result = append(result, option.value)
+			continue
+		}
+
+		name, err := r.componentName(option.componentType)
+		if err != nil {
+			return nil, fmt.Errorf("weaver: 配置 Handler Interceptor 失败: %w", err)
+		}
+		component, err := (runtimeInjector{runtime: r}).resolveComponent(name)
+		if err != nil {
+			return nil, fmt.Errorf("weaver: 为 Handler Interceptor 解析组件 %q 失败: %w", name, err)
+		}
+		interceptor, err := option.newInterceptor(component)
+		if err != nil {
+			return nil, fmt.Errorf("weaver: 为组件 %q 创建 Handler Interceptor 失败: %w", name, err)
+		}
+		result = append(result, connect.WithInterceptors(interceptor))
+	}
+	return result, nil
+}
+
+func (r *Runtime) componentName(componentType reflect.Type) (string, error) {
+	var matches []string
+	for name, registration := range r.registrations {
+		if registration.Service.componentType == componentType {
+			matches = append(matches, name)
+		}
+	}
+	sort.Strings(matches)
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("没有注册组件类型 %v", componentType)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("组件类型 %v 对应多个组件: %s", componentType, strings.Join(matches, ", "))
+	}
 }
 
 // Handler 返回只包含当前 unit 组件的 HTTP Handler。

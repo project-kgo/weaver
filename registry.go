@@ -38,7 +38,7 @@ func (r *Registry) Register(registration Registration) error {
 	if registration.New == nil || registration.Inject == nil {
 		return fmt.Errorf("weaver: 组件 %q 缺少工厂或注入函数", registration.Service.name)
 	}
-	if registration.Service.newLocal == nil || registration.Service.newRemote == nil || registration.Service.newHandler == nil {
+	if registration.Service.componentType == nil || registration.Service.newLocal == nil || registration.Service.newRemote == nil || registration.Service.newHandler == nil {
 		return fmt.Errorf("weaver: 组件 %q 的服务描述不完整", registration.Service.name)
 	}
 	if registration.ConfigType != nil && registration.ConfigType.Kind() != reflect.Struct {
