@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -166,6 +167,9 @@ func (r *Runtime) Handler() http.Handler {
 // Shutdown 幂等关闭组件，随后执行通过 WithShutdownHook 注册的外部关闭回调。
 // 未注册关闭回调的普通资源仍由调用方管理生命周期。
 func (r *Runtime) Shutdown(ctx context.Context) error {
+	defer func() {
+		slog.Info("runtime shutdown completed")
+	}()
 	if ctx == nil {
 		return fmt.Errorf("weaver: context 不能为空")
 	}

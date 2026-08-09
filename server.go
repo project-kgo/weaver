@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os/signal"
 	"time"
@@ -50,6 +51,7 @@ func Serve(ctx context.Context, currentUnit string, config Config, listenAddress
 		serverErr := server.Shutdown(shutdownCtx)
 		// Shutdown 会关闭监听器，等待 Serve 退出后再关闭组件，避免遗留服务 goroutine。
 		err = <-serveError
+		slog.Info("server shutdown")
 		runtimeErr := runtime.Shutdown(shutdownCtx)
 		cancel()
 		return errors.Join(normalizeServeError(err), serverErr, runtimeErr)
@@ -57,6 +59,7 @@ func Serve(ctx context.Context, currentUnit string, config Config, listenAddress
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
 	defer cancel()
+	slog.Info("server closed")
 	return errors.Join(
 		normalizeServeError(err),
 		server.Shutdown(shutdownCtx),
