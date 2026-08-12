@@ -615,6 +615,25 @@ func TestComponentConfigInjection(t *testing.T) {
 		}
 	})
 
+	t.Run("environment variable expansion", func(t *testing.T) {
+		t.Setenv("WEAVER_TEST_CONFIG_PREFIX", "secret: #value")
+		config, err := ParseConfig([]byte("units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\nweaver.test.v1.UpperService:\n  prefix: 'before-${WEAVER_TEST_CONFIG_PREFIX}-after'\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var implementation *configurableUpper
+		factoryCalled := false
+		registry := configRegistry(t, &implementation, &factoryCalled)
+		runtime, err := New(context.Background(), "app", config, WithRegistry(registry))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.Shutdown(context.Background())
+		if got, want := implementation.Config().Prefix, "before-secret: #value-after"; got != want {
+			t.Fatalf("unexpected expanded config: got %q, want %q", got, want)
+		}
+	})
+
 	t.Run("missing section uses zero value", func(t *testing.T) {
 		config, err := ParseConfig([]byte("units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\n"))
 		if err != nil {
@@ -666,6 +685,23 @@ func TestComponentConfigValidation(t *testing.T) {
 	if _, err := ParseConfig([]byte("units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\nunknown.Service:\n  value: true\n")); err == nil || !strings.Contains(err.Error(), "未出现在 placements") {
 		t.Fatalf("expected unknown section error, got %v", err)
 	}
+
+	t.Run("missing environment variable", func(t *testing.T) {
+		const environment = "WEAVER_TEST_CONFIG_MISSING_7D24DF24"
+		config := "units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\nweaver.test.v1.UpperService:\n  prefix: ${" + environment + "}\n"
+		_, err := ParseConfig([]byte(config))
+		if err == nil || !strings.Contains(err.Error(), "环境变量 \""+environment+"\" 未设置") {
+			t.Fatalf("expected missing environment variable error, got %v", err)
+		}
+	})
+
+	t.Run("malformed environment variable reference", func(t *testing.T) {
+		config := "units:\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: app\nweaver.test.v1.UpperService:\n  prefix: ${UNFINISHED\n"
+		_, err := ParseConfig([]byte(config))
+		if err == nil || !strings.Contains(err.Error(), "缺少右花括号") {
+			t.Fatalf("expected malformed environment variable reference error, got %v", err)
+		}
+	})
 
 	tests := []struct {
 		name    string

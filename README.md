@@ -88,6 +88,8 @@ game.wallet.v1.WalletService:
 
 组件配置段必须使用 `placements` 中的 protobuf service 全名。配置字段支持 `yaml` 标签；未知配置段、未知字段和类型错误都会导致启动失败。
 
+组件配置的字符串值支持使用 `${NAME}` 引用环境变量，也可以嵌入到其他文字中，例如 `dsn: 'postgres://${DB_USER}:${DB_PASSWORD}@db/app'`。未设置的环境变量或不完整的引用会使 `ParseConfig` 失败；环境变量值始终作为字符串处理，不会被重新解析成 YAML 结构。
+
 `http` 和 `https` 使用内置静态 Resolver。其他 scheme 通过 `WithResolver` 注册；Resolver 返回的 `HTTPClient` 自行负责实例变化、连接池和负载均衡。Weaver 只在启动阶段解析并缓存目标。
 
 内置静态 Resolver 的默认 Client 强制使用 HTTP/2：`http://` 目标使用明文 h2c prior knowledge，`https://` 目标使用 TLS HTTP/2，不会在连接失败后回退到 HTTP/1.1。远程 unit 因此必须启用对应的 HTTP/2 支持。通过 `WithHTTPClient` 或自定义 Resolver 提供 Client 时，调用方负责保证 Client 支持目标所需的 HTTP/2 传输。
