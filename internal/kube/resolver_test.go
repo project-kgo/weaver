@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/project-kgo/weaver/balancer"
 )
 
 func TestAPITransportPrefersHTTP2AndAllowsHTTP1Fallback(t *testing.T) {
@@ -97,19 +100,24 @@ func TestApplyDeletePublishesEmptySnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := newBackendClient(value)
-	client.update(resolver.aggregateLocked(value))
+	client, err := newBackendClient(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.update(resolver.aggregateLocked(value)); err != nil {
+		t.Fatal(err)
+	}
 	resolver.clients[value.key()] = client
 	resolver.serviceClients[value.serviceKey()] = map[string]*backendClient{value.key(): client}
 	watch := &namespaceWatch{namespace: "production", services: map[string]struct{}{"game": {}}}
 	resolver.sliceServices["production/only"] = "production/game"
-	if len(client.snapshot.Load().endpoints) != 1 {
+	if !backendHasEndpoint(client) {
 		t.Fatal("初始 endpoint 未发布")
 	}
 
 	resolver.applyEvent(watch, "DELETED", item)
-	if len(client.snapshot.Load().endpoints) != 0 {
-		t.Fatalf("删除后仍保留 endpoint: %v", client.snapshot.Load().endpoints)
+	if backendHasEndpoint(client) {
+		t.Fatal("删除后仍保留 endpoint")
 	}
 }
 
@@ -198,10 +206,10 @@ func TestExpiredWatchRelistsAndPublishesFreshState(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(time.Second)
-	for len(client.snapshot.Load().endpoints) != 1 && time.Now().Before(deadline) {
+	for !backendHasEndpoint(client) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if len(client.snapshot.Load().endpoints) != 1 {
+	if !backendHasEndpoint(client) {
 		t.Fatal("重新 LIST 后没有发布新 endpoint")
 	}
 	transport.mu.Lock()
@@ -249,43 +257,6 @@ func TestWatchClientDeadlineReconnectsStalledStream(t *testing.T) {
 	}
 }
 
-func TestBackendSelectionRoundRobin(t *testing.T) {
-	client := newBackendClient(target{namespace: "production", service: "game"})
-	first := &endpointTransport{address: "first"}
-	second := &endpointTransport{address: "second"}
-	first.active.Store(true)
-	second.active.Store(true)
-	client.snapshot.Store(&endpointSnapshot{endpoints: []*endpointTransport{first, second}})
-
-	for index, want := range []string{"first", "second", "first", "second"} {
-		endpoint, err := client.selectEndpoint()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if endpoint.address != want {
-			t.Fatalf("第 %d 次选择得到 %q, want %q", index, endpoint.address, want)
-		}
-	}
-}
-
-func BenchmarkBackendSelection(b *testing.B) {
-	client := newBackendClient(target{namespace: "production", service: "game"})
-	endpoints := make([]*endpointTransport, 16)
-	for index := range endpoints {
-		endpoints[index] = &endpointTransport{}
-		endpoints[index].active.Store(true)
-	}
-	client.snapshot.Store(&endpointSnapshot{endpoints: endpoints})
-	b.ReportAllocs()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			if _, err := client.selectEndpoint(); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-}
-
 func testSlice(name, namespace, service, addressType string, endpoints []endpoint, ports []endpointPort) endpointSlice {
 	return endpointSlice{
 		Metadata: objectMetadata{
@@ -297,6 +268,14 @@ func testSlice(name, namespace, service, addressType string, endpoints []endpoin
 		Endpoints:   endpoints,
 		Ports:       ports,
 	}
+}
+
+func backendHasEndpoint(client *backendClient) bool {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://service/test", nil)
+	_, err := client.Do(request)
+	return !errors.Is(err, balancer.ErrNoAvailableEndpoint)
 }
 
 type discoveryTransport struct {

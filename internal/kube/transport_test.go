@@ -1,93 +1,59 @@
 package kube
 
 import (
-	"fmt"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"sync/atomic"
 	"testing"
 )
 
-func TestBackendClientUsesH2CAndRoundRobin(t *testing.T) {
-	var firstCalls atomic.Int64
-	first := startH2CServer(t, &firstCalls)
-	defer first.Close()
-	var secondCalls atomic.Int64
-	second := startH2CServer(t, &secondCalls)
-	defer second.Close()
+func TestBackendClientUsesH2C(t *testing.T) {
+	var calls atomic.Int64
+	server := startH2CServer(t, &calls)
+	defer server.Close()
 
-	client := newBackendClient(target{
+	client, err := newBackendClient(target{
 		namespace: "production",
 		service:   "game",
 		port:      "connect",
 	})
-	client.update([]string{first.Listener.Addr().String(), second.Listener.Addr().String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.update([]string{server.Listener.Addr().String()}); err != nil {
+		t.Fatal(err)
+	}
 	defer client.close()
 
-	for range 4 {
-		request, err := http.NewRequest(http.MethodPost, "http://game.production.svc/test", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		response, err := client.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = io.Copy(io.Discard, response.Body)
-		_ = response.Body.Close()
+	request, err := http.NewRequest(http.MethodPost, "http://game.production.svc/test", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if firstCalls.Load() != 2 || secondCalls.Load() != 2 {
-		t.Fatalf("round-robin calls = %d/%d, want 2/2", firstCalls.Load(), secondCalls.Load())
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	client.update([]string{second.Listener.Addr().String()})
-	for range 2 {
-		request, _ := http.NewRequest(http.MethodPost, "http://game.production.svc/test", nil)
-		response, err := client.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = response.Body.Close()
-	}
-	if firstCalls.Load() != 2 || secondCalls.Load() != 4 {
-		t.Fatalf("移除 endpoint 后 calls = %d/%d, want 2/4", firstCalls.Load(), secondCalls.Load())
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if calls.Load() != 1 {
+		t.Fatalf("calls = %d, want 1", calls.Load())
 	}
 }
 
-func TestBackendSelectionDuringEndpointUpdatesNeverFailsTransiently(t *testing.T) {
-	client := newBackendClient(target{namespace: "production", service: "game"})
-	many := make([]string, 128)
-	for index := range many {
-		many[index] = fmt.Sprintf("10.0.0.%d:8080", index+1)
+func TestEndpointClientMarksDialErrors(t *testing.T) {
+	client := newEndpointClient(
+		target{namespace: "production", service: "game"},
+		"127.0.0.1:not-a-port",
+	)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", client.Transport)
 	}
-	retained := []string{many[len(many)-1]}
-	client.update(many)
-	defer client.close()
-
-	var wait sync.WaitGroup
-	errors := make(chan error, 8)
-	for range 8 {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			for range 20_000 {
-				if _, err := client.selectEndpoint(); err != nil {
-					errors <- err
-					return
-				}
-			}
-		}()
-	}
-	for range 1_000 {
-		client.update(retained)
-		client.update(many)
-	}
-	wait.Wait()
-	close(errors)
-	for err := range errors {
-		t.Fatalf("端点更新期间选择失败: %v", err)
+	_, err := transport.DialContext(context.Background(), "tcp", "ignored")
+	if !isEndpointDialError(err) {
+		t.Fatalf("error = %v, want endpointDialError", err)
 	}
 }
 

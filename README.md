@@ -92,6 +92,27 @@ game.wallet.v1.WalletService:
 
 `http` 和 `https` 使用内置静态 Resolver。`kube` 使用内置 Kubernetes Resolver，无需调用 `WithResolver`；其他 scheme 仍通过 `WithResolver` 注册。Resolver 返回的 `HTTPClient` 自行负责实例变化、连接池和负载均衡，Weaver 只在启动阶段解析并缓存目标。
 
+自定义 Resolver 可以复用公共 `balancer` 包管理动态 endpoint。发现层只需在地址变化时调用 `Update`，并在关闭时调用 `Close`：
+
+```go
+pool, err := balancer.New(
+    newEndpointClient, // 根据地址创建独立的 *http.Client
+    balancer.WithRetryableError(isDialError),
+)
+if err != nil {
+    return err
+}
+if err := pool.Update(addresses); err != nil {
+    return err
+}
+resolved := weaver.ResolvedTarget{
+    BaseURL:    "http://game.service",
+    HTTPClient: pool,
+}
+```
+
+`balancer` 使用 P2C 从两个随机候选中选择得分更低的 endpoint。得分同时考虑延迟 EWMA、基础设施错误 EWMA 和在途请求数；默认 EWMA 半衰期为 10 秒、错误惩罚为 1 秒、最多尝试 2 个不同 endpoint。只有调用方明确标记的安全错误才会切换 endpoint 重试；除 `502`/`503`/`504` 外的 HTTP 或业务响应不会降低节点权重。
+
 内置静态 Resolver 的默认 Client 强制使用 HTTP/2：`http://` 目标使用明文 h2c prior knowledge，`https://` 目标使用 TLS HTTP/2，不会在连接失败后回退到 HTTP/1.1。远程 unit 因此必须启用对应的 HTTP/2 支持。通过 `WithHTTPClient` 或自定义 Resolver 提供 Client 时，调用方负责保证 Client 支持目标所需的 HTTP/2 传输。
 
 Kubernetes target 使用 `kube://<namespace>/<service>:<port>`：
@@ -104,7 +125,7 @@ units:
 
 端口名从 EndpointSlice 的命名端口解析，数字端口表示 Pod 实际监听端口。默认使用 h2c；通过 `?transport=https` 使用 TLS，并以 `<service>.<namespace>.svc` 作为 ServerName。Runtime 会在启动时收集当前 unit 实际依赖的全部 `kube` target；同一 namespace 的 Service 合并为一套带 `labelSelector` 的分页 LIST/WATCH，不读取无关 Service。不同 namespace 的 WATCH 共用一个优先使用 HTTP/2 的 Kubernetes Client，HTTP/2 可用时会复用底层连接。
 
-业务请求按 Pod 复用独立 HTTP/2 连接并执行无锁 round-robin。控制面暂时断开时保留最后一次有效结果；LIST 和 WATCH 都有客户端超时保护，WATCH 到期或半断开后自动重连，`resourceVersion` 过期时自动重新 LIST。
+业务请求按 Pod 复用独立 HTTP/2 连接，并通过 P2C 与延迟/错误 EWMA 动态选择 endpoint。控制面暂时断开时保留最后一次有效结果；LIST 和 WATCH 都有客户端超时保护，WATCH 到期或半断开后自动重连，`resourceVersion` 过期时自动重新 LIST。
 
 Pod 的 ServiceAccount 只需要在涉及的 namespace 中读取 EndpointSlice。以下 `Role` 和对应的 `RoleBinding` 需要在每个目标 namespace 部署一次：
 

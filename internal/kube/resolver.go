@@ -162,7 +162,14 @@ func (r *Resolver) Resolve(_ context.Context, rawTarget string) (string, *backen
 
 	client := r.clients[value.key()]
 	if client == nil {
-		client = newBackendClient(value)
+		client, err = newBackendClient(value)
+		if err != nil {
+			return "", nil, fmt.Errorf("kube: 创建 service %s/%s 负载均衡客户端失败: %w", value.namespace, value.service, err)
+		}
+		if err := client.update(r.aggregateLocked(value)); err != nil {
+			client.close()
+			return "", nil, fmt.Errorf("kube: 发布 service %s/%s endpoint 失败: %w", value.namespace, value.service, err)
+		}
 		r.clients[value.key()] = client
 		serviceClients := r.serviceClients[value.serviceKey()]
 		if serviceClients == nil {
@@ -170,7 +177,6 @@ func (r *Resolver) Resolve(_ context.Context, rawTarget string) (string, *backen
 			r.serviceClients[value.serviceKey()] = serviceClients
 		}
 		serviceClients[value.key()] = client
-		client.update(r.aggregateLocked(value))
 	}
 	return value.baseURL(), client, nil
 }
@@ -308,8 +314,7 @@ func (r *Resolver) relist(ctx context.Context, watch *namespaceWatch) error {
 	watch.resourceVersion = resourceVersion
 	updates := r.namespaceUpdatesLocked(watch)
 	r.mu.Unlock()
-	publishUpdates(updates)
-	return nil
+	return publishUpdates(updates)
 }
 
 func (r *Resolver) getJSON(ctx context.Context, endpoint string, destination any) error {
@@ -489,7 +494,9 @@ func (r *Resolver) applyEvent(watch *namespaceWatch, eventType string, item endp
 	}
 	updates := r.servicesUpdatesLocked(affected)
 	r.mu.Unlock()
-	publishUpdates(updates)
+	if err := publishUpdates(updates); err != nil {
+		slog.Error("kube 发布 endpoint 更新失败", "namespace", watch.namespace, "error", err)
+	}
 }
 
 func (r *Resolver) deleteSliceLocked(serviceKey, sliceName string) {
@@ -536,10 +543,14 @@ func (r *Resolver) servicesUpdatesLocked(services map[string]struct{}) []clientU
 	return updates
 }
 
-func publishUpdates(updates []clientUpdate) {
+func publishUpdates(updates []clientUpdate) error {
+	var result error
 	for _, update := range updates {
-		update.client.update(update.addresses)
+		if err := update.client.update(update.addresses); err != nil {
+			result = errors.Join(result, err)
+		}
 	}
+	return result
 }
 
 func (r *Resolver) aggregateLocked(value target) []string {
