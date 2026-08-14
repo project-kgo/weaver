@@ -8,7 +8,7 @@ Weaver 是一个很薄的 ConnectRPC 部署感知运行时。它让同一份 Go 
 2. 同 unit 直接调用 Go 实现，跨 unit 使用基于 HTTP/2 的 ConnectRPC。
 3. 注册、Handler 挂载、Client 创建和依赖注入由代码生成完成。
 
-它不是 Service Weaver 的重写，也不负责调度、扩缩容、动态迁移、服务注册或负载均衡。
+它不是 Service Weaver 的重写，也不负责调度、扩缩容、动态迁移或通用服务注册。内置 Kubernetes Resolver 只负责根据 EndpointSlice 发现 Pod，并在客户端执行轻量负载均衡。
 
 ## 开发体验
 
@@ -90,9 +90,37 @@ game.wallet.v1.WalletService:
 
 组件配置的字符串值支持使用 `${NAME}` 引用环境变量，也可以嵌入到其他文字中，例如 `dsn: 'postgres://${DB_USER}:${DB_PASSWORD}@db/app'`。未设置的环境变量或不完整的引用会使 `ParseConfig` 失败；环境变量值始终作为字符串处理，不会被重新解析成 YAML 结构。
 
-`http` 和 `https` 使用内置静态 Resolver。其他 scheme 通过 `WithResolver` 注册；Resolver 返回的 `HTTPClient` 自行负责实例变化、连接池和负载均衡。Weaver 只在启动阶段解析并缓存目标。
+`http` 和 `https` 使用内置静态 Resolver。`kube` 使用内置 Kubernetes Resolver，无需调用 `WithResolver`；其他 scheme 仍通过 `WithResolver` 注册。Resolver 返回的 `HTTPClient` 自行负责实例变化、连接池和负载均衡，Weaver 只在启动阶段解析并缓存目标。
 
 内置静态 Resolver 的默认 Client 强制使用 HTTP/2：`http://` 目标使用明文 h2c prior knowledge，`https://` 目标使用 TLS HTTP/2，不会在连接失败后回退到 HTTP/1.1。远程 unit 因此必须启用对应的 HTTP/2 支持。通过 `WithHTTPClient` 或自定义 Resolver 提供 Client 时，调用方负责保证 Client 支持目标所需的 HTTP/2 传输。
+
+Kubernetes target 使用 `kube://<namespace>/<service>:<port>`：
+
+```yaml
+units:
+  core: kube://production/weaver-core:connect
+  game: kube://production/weaver-game:8080
+```
+
+端口名从 EndpointSlice 的命名端口解析，数字端口表示 Pod 实际监听端口。默认使用 h2c；通过 `?transport=https` 使用 TLS，并以 `<service>.<namespace>.svc` 作为 ServerName。Runtime 会在启动时收集当前 unit 实际依赖的全部 `kube` target；同一 namespace 的 Service 合并为一套带 `labelSelector` 的分页 LIST/WATCH，不读取无关 Service。不同 namespace 的 WATCH 共用一个优先使用 HTTP/2 的 Kubernetes Client，HTTP/2 可用时会复用底层连接。
+
+业务请求按 Pod 复用独立 HTTP/2 连接并执行无锁 round-robin。控制面暂时断开时保留最后一次有效结果；LIST 和 WATCH 都有客户端超时保护，WATCH 到期或半断开后自动重连，`resourceVersion` 过期时自动重新 LIST。
+
+Pod 的 ServiceAccount 只需要在涉及的 namespace 中读取 EndpointSlice。以下 `Role` 和对应的 `RoleBinding` 需要在每个目标 namespace 部署一次：
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: weaver-endpointslice-reader
+  namespace: production
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list", "watch"]
+```
+
+内置 Resolver 从标准 ServiceAccount token 和 CA 文件读取凭证，只在首次使用 `kube` target 时初始化，并由 Runtime 在正常退出或启动失败时自动关闭。EndpointSlice 暂时没有 ready endpoint 不阻止 Runtime 启动；调用会返回无可用 endpoint，发现结果更新后自动恢复。
 
 组件创建顺序为：严格校验全部组件配置、创建全部本地实例、注入 `WithConfig`/`Resource`/`Ref`、按依赖顺序执行 `Init`、挂载当前 unit 的 Handler。关闭时按相反顺序执行 `Shutdown`。普通资源由调用方管理生命周期。
 

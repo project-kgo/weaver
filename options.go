@@ -85,6 +85,9 @@ func WithResolver(scheme string, resolver Resolver) Option {
 		if scheme == "http" || scheme == "https" {
 			return fmt.Errorf("weaver: %s 使用内置静态 Resolver，请通过 WithHTTPClient 自定义传输", scheme)
 		}
+		if scheme == "kube" {
+			return fmt.Errorf("weaver: kube 使用内置 Kubernetes Resolver，不能覆盖注册")
+		}
 		if resolver == nil || isNil(resolver) {
 			return fmt.Errorf("weaver: Resolver %q 不能为空", scheme)
 		}

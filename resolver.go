@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"connectrpc.com/connect"
+	"github.com/project-kgo/weaver/internal/kube"
 )
 
 // Resolver 把 unit target 解析为 Connect 可使用的目标。
@@ -23,6 +25,54 @@ type ResolvedTarget struct {
 
 type staticResolver struct {
 	client connect.HTTPClient
+}
+
+// builtinKubeResolver 延迟读取集群凭证，未使用 kube target 时不会访问 Kubernetes。
+type builtinKubeResolver struct {
+	once     sync.Once
+	resolver *kube.Resolver
+	err      error
+}
+
+// Prepare 在 Runtime 创建组件前注册全部实际依赖的 target，并启动按 namespace 合并的发现流。
+func (r *builtinKubeResolver) Prepare(ctx context.Context, targets []string) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	r.once.Do(func() {
+		r.resolver, r.err = kube.NewInCluster()
+		if r.err != nil {
+			return
+		}
+		for _, target := range targets {
+			if _, _, r.err = r.resolver.Resolve(ctx, target); r.err != nil {
+				return
+			}
+		}
+		r.err = r.resolver.Start(ctx)
+	})
+	return r.err
+}
+
+func (r *builtinKubeResolver) Resolve(ctx context.Context, target string) (ResolvedTarget, error) {
+	if r.err != nil {
+		return ResolvedTarget{}, r.err
+	}
+	if r.resolver == nil {
+		return ResolvedTarget{}, fmt.Errorf("weaver: kube target %q 未在 Runtime 启动前准备", target)
+	}
+	baseURL, client, err := r.resolver.Resolve(ctx, target)
+	if err != nil {
+		return ResolvedTarget{}, err
+	}
+	return ResolvedTarget{BaseURL: baseURL, HTTPClient: client}, nil
+}
+
+func (r *builtinKubeResolver) Shutdown(ctx context.Context) error {
+	if r.resolver == nil {
+		return nil
+	}
+	return r.resolver.Shutdown(ctx)
 }
 
 func (r staticResolver) Resolve(_ context.Context, target string) (ResolvedTarget, error) {

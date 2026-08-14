@@ -989,11 +989,21 @@ func TestInitFailureRollsBack(t *testing.T) {
 		Units:      map[string]string{"app": ""},
 		Placements: map[string]string{upperServiceName: "app", callerServiceName: "app"},
 	}
-	_, err := New(context.Background(), "app", config, WithRegistry(registry), WithResource(&prefix))
+	_, err := New(
+		context.Background(),
+		"app",
+		config,
+		WithRegistry(registry),
+		WithResource(&prefix),
+		WithShutdownHook(func(context.Context) error {
+			events = append(events, "hook:shutdown")
+			return nil
+		}),
+	)
 	if err == nil || !strings.Contains(err.Error(), "init failed") {
 		t.Fatalf("expected init failure, got %v", err)
 	}
-	want := []string{"upper:init", "caller:init", "upper:shutdown"}
+	want := []string{"upper:init", "caller:init", "upper:shutdown", "hook:shutdown"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("unexpected rollback order: %v", events)
 	}
@@ -1051,6 +1061,68 @@ type countingResolver struct {
 	mu     sync.Mutex
 	calls  int
 	target ResolvedTarget
+}
+
+func TestKubeResolverIsBuiltInAndReserved(t *testing.T) {
+	options := newRuntimeOptions()
+	err := WithResolver("kube", &countingResolver{}).apply(&options)
+	if err == nil || !strings.Contains(err.Error(), "内置 Kubernetes Resolver") {
+		t.Fatalf("WithResolver(kube) error = %v", err)
+	}
+
+	prefix := "x:"
+	var events []string
+	var upper *upperImpl
+	var caller *callerImpl
+	registry := testRegistry(t, &events, &upper, &caller)
+	config := Config{
+		Units:      map[string]string{"app": ""},
+		Placements: map[string]string{upperServiceName: "app", callerServiceName: "app"},
+	}
+	runtime, err := New(context.Background(), "app", config, WithRegistry(registry), WithResource(&prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	if _, exists := runtime.options.resolvers["kube"]; !exists {
+		t.Fatal("Runtime 未注册内置 kube Resolver")
+	}
+
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	remoteConfig := Config{
+		Units: map[string]string{"core": "kube://production/core:connect", "game": ""},
+		Placements: map[string]string{
+			upperServiceName:  "core",
+			callerServiceName: "game",
+		},
+	}
+	_, err = New(context.Background(), "game", remoteConfig, WithRegistry(registry))
+	if err == nil || !strings.Contains(err.Error(), "KUBERNETES_SERVICE_HOST") {
+		t.Fatalf("内置 kube Resolver error = %v", err)
+	}
+}
+
+func TestUnusedKubeTargetDoesNotInitializeResolver(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	prefix := "x:"
+	var events []string
+	var upper *upperImpl
+	var caller *callerImpl
+	registry := testRegistry(t, &events, &upper, &caller)
+	config := Config{
+		Units: map[string]string{
+			"app":    "",
+			"unused": "kube://production/unused:connect",
+		},
+		Placements: map[string]string{upperServiceName: "app", callerServiceName: "app"},
+	}
+	runtime, err := New(context.Background(), "app", config, WithRegistry(registry), WithResource(&prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
 }
 
 func (r *countingResolver) Resolve(context.Context, string) (ResolvedTarget, error) {

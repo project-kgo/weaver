@@ -39,7 +39,7 @@ type Runtime struct {
 }
 
 // New 创建、注入并初始化当前 unit 的全部组件。
-func New(ctx context.Context, currentUnit string, config Config, values ...Option) (*Runtime, error) {
+func New(ctx context.Context, currentUnit string, config Config, values ...Option) (_ *Runtime, resultErr error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("weaver: context 不能为空")
 	}
@@ -76,6 +76,10 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 	}
 	options.resolvers["http"] = staticResolver{client: options.httpClient}
 	options.resolvers["https"] = staticResolver{client: options.httpClient}
+	kubeResolver := &builtinKubeResolver{}
+	options.resolvers["kube"] = kubeResolver
+	// 内置 Resolver 由 Runtime 管理，最后注册使其先于调用方资源关闭。
+	options.shutdownHooks = append(options.shutdownHooks, kubeResolver.Shutdown)
 
 	runtime := &Runtime{
 		currentUnit:   currentUnit,
@@ -89,6 +93,18 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 		configs:       make(map[string]any),
 		resolvedUnits: make(map[string]ResolvedTarget),
 	}
+	// 启动中途失败也必须释放已经初始化的组件、内置 Resolver 和外部 hook。
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		cleanupCtx := context.WithoutCancel(ctx)
+		resultErr = errors.Join(
+			resultErr,
+			runtime.shutdownComponents(cleanupCtx),
+			runtime.runShutdownHooks(cleanupCtx),
+		)
+	}()
 	order, err := runtime.validateAndOrder()
 	if err != nil {
 		return nil, err
@@ -98,6 +114,13 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 	}
 	if err := runtime.decodeComponentConfigs(order); err != nil {
 		return nil, err
+	}
+	kubeTargets, err := runtime.requiredKubeTargets()
+	if err != nil {
+		return nil, err
+	}
+	if err := kubeResolver.Prepare(ctx, kubeTargets); err != nil {
+		return nil, fmt.Errorf("weaver: 准备内置 kube Resolver 失败: %w", err)
 	}
 
 	for _, name := range order {
@@ -175,6 +198,52 @@ func (r *Runtime) validateHandlerOptions() error {
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) requiredKubeTargets() ([]string, error) {
+	requiredUnits := make(map[string]struct{})
+	addComponent := func(name string) {
+		unit := r.config.Placements[name]
+		if unit != r.currentUnit {
+			requiredUnits[unit] = struct{}{}
+		}
+	}
+	for name, registration := range r.registrations {
+		if r.config.Placements[name] != r.currentUnit {
+			continue
+		}
+		for _, dependency := range registration.Dependencies {
+			addComponent(dependency)
+		}
+	}
+	for _, option := range r.options.handlerOptions {
+		if option.componentType == nil {
+			continue
+		}
+		name, err := r.componentName(option.componentType)
+		if err != nil {
+			return nil, fmt.Errorf("weaver: 配置 Handler Interceptor 失败: %w", err)
+		}
+		addComponent(name)
+	}
+
+	units := make([]string, 0, len(requiredUnits))
+	for unit := range requiredUnits {
+		units = append(units, unit)
+	}
+	sort.Strings(units)
+	targets := make([]string, 0, len(units))
+	for _, unit := range units {
+		target := strings.TrimSpace(r.config.Units[unit])
+		parsed, err := url.Parse(target)
+		if err != nil {
+			return nil, fmt.Errorf("weaver: 无效 target %q: %w", target, err)
+		}
+		if strings.EqualFold(parsed.Scheme, "kube") {
+			targets = append(targets, target)
+		}
+	}
+	return targets, nil
 }
 
 func (r *Runtime) buildHandlerOptions(builtin []connect.HandlerOption) ([]connect.HandlerOption, error) {
