@@ -1,8 +1,6 @@
 package weaver
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -72,18 +70,19 @@ func (s Service[T]) ServiceName() string {
 
 // NormalizeError 对齐本地调用与 Connect 远程调用的未知错误语义。
 func NormalizeError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var connectErr *connect.Error
-	if errors.As(err, &connectErr) {
-		return err
-	}
-	if errors.Is(err, context.Canceled) {
-		return connect.NewError(connect.CodeCanceled, err)
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return connect.NewError(connect.CodeDeadlineExceeded, err)
-	}
-	return connect.NewError(connect.CodeUnknown, err)
+	return err
+	// if err == nil {
+	// 	return nil
+	// }
+	// var connectErr *connect.Error
+	// if errors.As(err, &connectErr) {
+	// 	return err
+	// }
+	// if errors.Is(err, context.Canceled) {
+	// 	return connect.NewError(connect.CodeCanceled, err)
+	// }
+	// if errors.Is(err, context.DeadlineExceeded) {
+	// 	return connect.NewError(connect.CodeDeadlineExceeded, err)
+	// }
+	// return connect.NewError(connect.CodeUnknown, err)
 }
