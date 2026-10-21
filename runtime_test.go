@@ -1235,3 +1235,166 @@ func TestParseConfigStrict(t *testing.T) {
 		t.Fatal("expected unknown field error")
 	}
 }
+
+// callerOnlyRegistry 模拟只引入 UpperService 协议包、本进程没有其实现的场景。
+func callerOnlyRegistry(t *testing.T, events *[]string, callerResult **callerImpl) *Registry {
+	t.Helper()
+	var unusedUpper *upperImpl
+	registry := testRegistry(t, events, &unusedUpper, callerResult)
+	registry.mu.Lock()
+	delete(registry.registrations, upperServiceName)
+	registry.mu.Unlock()
+	return registry
+}
+
+func TestExternalServiceCalledThroughRef(t *testing.T) {
+	prefix := "ext:"
+	var coreEvents []string
+	var coreUpper *upperImpl
+	var unusedCaller *callerImpl
+	coreRegistry := testRegistry(t, &coreEvents, &coreUpper, &unusedCaller)
+	coreConfig := Config{
+		Units:      map[string]string{"core": "", "game": "http://unused.invalid"},
+		Placements: map[string]string{upperServiceName: "core", callerServiceName: "game"},
+	}
+	coreRuntime, err := New(context.Background(), "core", coreConfig, WithRegistry(coreRegistry), WithResource(&prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coreRuntime.Shutdown(context.Background())
+	server := httptest.NewServer(coreRuntime.Handler())
+	defer server.Close()
+
+	resolver := &countingResolver{target: ResolvedTarget{BaseURL: server.URL, HTTPClient: http.DefaultClient}}
+	var events []string
+	var caller *callerImpl
+	registry := callerOnlyRegistry(t, &events, &caller)
+	config := Config{
+		Units:      map[string]string{"order": "fake://order", "app": ""},
+		Placements: map[string]string{upperServiceName: "order", callerServiceName: "app"},
+	}
+	runtime, err := New(context.Background(), "app", config,
+		WithRegistry(registry),
+		WithResolver("fake", resolver),
+		WithExternal(upperService()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+
+	request := wrapperspb.String("hello")
+	response, err := caller.Call(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Value != "ext:HELLO" || request.Value != "hello" {
+		t.Fatalf("unexpected response=%q request=%q", response.Value, request.Value)
+	}
+	if _, err := caller.Call(context.Background(), wrapperspb.String("error")); connect.CodeOf(err) != connect.CodeUnknown {
+		t.Fatalf("expected unknown, got %v", err)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("resolver called %d times", resolver.calls)
+	}
+	if _, exists := registry.snapshot()[upperServiceName]; exists {
+		t.Fatal("external service leaked into registry")
+	}
+
+	// 外部服务不在本进程提供 Handler。
+	recorder := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, upperProcedure, nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected external handler to be absent, got %d", recorder.Code)
+	}
+}
+
+func TestExternalServiceValidation(t *testing.T) {
+	baseConfig := func() Config {
+		return Config{
+			Units:      map[string]string{"order": "http://order.invalid", "app": ""},
+			Placements: map[string]string{upperServiceName: "order", callerServiceName: "app"},
+		}
+	}
+	tests := []struct {
+		name          string
+		keepUpperImpl bool
+		config        func() Config
+		options       []Option
+		want          string
+	}{
+		{
+			name:   "missing option",
+			config: baseConfig,
+			want:   "未注册组件",
+		},
+		{
+			name:    "placed on current unit",
+			config:  func() Config { c := baseConfig(); c.Placements[upperServiceName] = "app"; return c },
+			options: []Option{WithExternal(upperService())},
+			want:    "不能放在当前 unit",
+		},
+		{
+			name:    "missing placement",
+			config:  func() Config { c := baseConfig(); delete(c.Placements, upperServiceName); return c },
+			options: []Option{WithExternal(upperService())},
+			want:    "缺少 placement",
+		},
+		{
+			name:          "conflicts with implementation",
+			keepUpperImpl: true,
+			config:        baseConfig,
+			options:       []Option{WithExternal(upperService())},
+			want:          "重复",
+		},
+		{
+			name:    "declared twice",
+			config:  baseConfig,
+			options: []Option{WithExternal(upperService()), WithExternal(upperService())},
+			want:    "重复",
+		},
+		{
+			name: "component config",
+			config: func() Config {
+				c, err := ParseConfig([]byte("units:\n  order: http://order.invalid\n  app: ''\nplacements:\n  weaver.test.v1.UpperService: order\n  weaver.test.v1.CallerService: app\nweaver.test.v1.UpperService:\n  prefix: x\n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return c
+			},
+			options: []Option{WithExternal(upperService())},
+			want:    "不接受组件配置",
+		},
+		{
+			name:    "empty name",
+			config:  baseConfig,
+			options: []Option{WithExternal(Service[upperAPI]{NewRemote: upperService().NewRemote})},
+			want:    "名称不能为空",
+		},
+		{
+			name:    "missing remote factory",
+			config:  baseConfig,
+			options: []Option{WithExternal(Service[upperAPI]{Name: upperServiceName})},
+			want:    "缺少远程客户端工厂",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var events []string
+			var upper *upperImpl
+			var caller *callerImpl
+			registry := callerOnlyRegistry(t, &events, &caller)
+			if test.keepUpperImpl {
+				registry = testRegistry(t, &events, &upper, &caller)
+			}
+			options := append([]Option{WithRegistry(registry), WithResource(new(string))}, test.options...)
+			_, err := New(context.Background(), "app", test.config(), options...)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q, got %v", test.want, err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("components initialized before validation failed: %v", events)
+			}
+		})
+	}
+}

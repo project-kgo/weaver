@@ -5,6 +5,7 @@ units:
 placements:
   weaver.example.v1.UpperService: core
   weaver.example.v1.EchoService: game
+  weaver.example.v1.LoginService: core
 
 weaver.example.v1.UpperService:
   prefix: "echo:"

@@ -143,6 +143,27 @@ rules:
 
 内置 Resolver 从标准 ServiceAccount token 和 CA 文件读取凭证，只在首次使用 `kube` target 时初始化，并由 Runtime 在正常退出或启动失败时自动关闭。EndpointSlice 暂时没有 ready endpoint 不阻止 Runtime 启动；调用会返回无可用 endpoint，发现结果更新后自动恢复。
 
+### 外部服务
+
+只引入某个 protobuf service 的生成包、本进程没有它的实现时，用 `WithExternal` 声明它，业务组件照常通过 `Ref[T]` 调用：
+
+```go
+runtime, err := weaver.New(ctx, "app", config,
+    weaver.WithExternal(orderv1weaver.OrderService),
+)
+```
+
+```yaml
+units:
+  app: http://0.0.0.0:8080
+  order: http://order.internal:8080 # 本进程不会以该 unit 启动
+
+placements:
+  game.order.v1.OrderService: order
+```
+
+外部服务同样需要 placement，调用地址由所指 unit 的 target 决定，并复用相同的 Resolver。外部服务不能放在当前 unit，不能与生成代码注册的实现重名，也不接受组件配置段，违反时启动失败。目标服务需要兼容 Connect 协议。以后该服务有了本地实现，删掉 `WithExternal` 并调整 placement 即可，业务代码不用改。
+
 组件创建顺序为：严格校验全部组件配置、创建全部本地实例、注入 `WithConfig`/`Resource`/`Ref`、按依赖顺序执行 `Init`、挂载当前 unit 的 Handler。关闭时按相反顺序执行 `Shutdown`。普通资源由调用方管理生命周期。
 
 ## Recovery 与 OpenTelemetry

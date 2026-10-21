@@ -382,7 +382,7 @@ func TestHandlerRecovery(t *testing.T) {
 			if err != nil || response.Msg.Value != "x:OK" {
 				t.Fatalf("handler did not recover for subsequent request: response=%v err=%v", response, err)
 			}
-			if strings.Count(logs.String(), "组件调用发生 panic") != 1 || !strings.Contains(logs.String(), test.panicText) || !strings.Contains(logs.String(), "stack=") {
+			if strings.Count(logs.String(), "msg=[panic]") != 1 || !strings.Contains(logs.String(), test.panicText) || !strings.Contains(logs.String(), "stack=") {
 				t.Fatalf("unexpected recovery log: %s", logs.String())
 			}
 			foundException := false

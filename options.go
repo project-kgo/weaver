@@ -28,6 +28,7 @@ type runtimeOptions struct {
 	clientOptions  []connect.ClientOption
 	handlerOptions []handlerOption
 	shutdownHooks  []ShutdownHook
+	externals      []ServiceDescriptor
 }
 
 // handlerOption 延迟需要组件代理的 Handler 配置，确保它与普通配置保持注册顺序。
@@ -184,6 +185,21 @@ func WithHandlerInterceptor[T any](factory func(T) connect.Interceptor) Option {
 				return interceptor, nil
 			},
 		})
+		return nil
+	})
+}
+
+// WithExternal 声明一个本进程没有实现、只通过 Ref[T] 远程调用的外部服务。
+// 外部服务同样需要 placement，其指向的 unit target 决定调用地址，且不能是当前 unit。
+func WithExternal[T any](service Service[T]) Option {
+	return optionFunc(func(options *runtimeOptions) error {
+		if strings.TrimSpace(service.Name) == "" {
+			return fmt.Errorf("weaver: 外部服务名称不能为空")
+		}
+		if service.NewRemote == nil {
+			return fmt.Errorf("weaver: 外部服务 %q 缺少远程客户端工厂", service.Name)
+		}
+		options.externals = append(options.externals, service.Descriptor())
 		return nil
 	})
 }

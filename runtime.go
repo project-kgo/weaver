@@ -105,6 +105,9 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 			runtime.runShutdownHooks(cleanupCtx),
 		)
 	}()
+	if err = runtime.addExternals(); err != nil {
+		return nil, err
+	}
 	order, err := runtime.validateAndOrder()
 	if err != nil {
 		return nil, err
@@ -348,12 +351,15 @@ func (r *Runtime) validateAndOrder() ([]string, error) {
 		}
 	}
 	localCount := 0
-	for name := range r.registrations {
+	for name, registration := range r.registrations {
 		unit, exists := r.config.Placements[name]
 		if !exists || strings.TrimSpace(unit) == "" {
 			return nil, fmt.Errorf("weaver: 组件 %q 缺少 placement", name)
 		}
 		if unit == r.currentUnit {
+			if registration.New == nil {
+				return nil, fmt.Errorf("weaver: 外部服务 %q 没有本地实现，不能放在当前 unit %q", name, unit)
+			}
 			localCount++
 		}
 	}
@@ -366,6 +372,18 @@ func (r *Runtime) validateAndOrder() ([]string, error) {
 		}
 	}
 	return topologicalOrder(r.registrations)
+}
+
+// addExternals 把外部服务并入本次 Runtime 的组件表。外部服务没有工厂和注入函数，
+// 只会走远程分支；不写入 Registry，避免影响同进程的其他 Runtime。
+func (r *Runtime) addExternals() error {
+	for _, service := range r.options.externals {
+		if _, exists := r.registrations[service.name]; exists {
+			return fmt.Errorf("weaver: 外部服务 %q 与已注册组件或其他外部服务重复", service.name)
+		}
+		r.registrations[service.name] = Registration{Service: service}
+	}
+	return nil
 }
 
 type runtimeInjector struct {
@@ -441,6 +459,9 @@ func (r *Runtime) decodeComponentConfigs(order []string) error {
 	for _, name := range order {
 		registration := r.registrations[name]
 		data, configured := r.config.componentConfigs[name]
+		if registration.New == nil && configured {
+			return fmt.Errorf("weaver: 外部服务 %q 不接受组件配置", name)
+		}
 		if registration.ConfigType == nil {
 			if configured {
 				return fmt.Errorf("weaver: 组件 %q 提供了配置，但实现未声明 WithConfig[T]", name)
