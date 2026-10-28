@@ -164,6 +164,40 @@ placements:
 
 外部服务同样需要 placement，调用地址由所指 unit 的 target 决定，并复用相同的 Resolver。外部服务不能放在当前 unit，不能与生成代码注册的实现重名，也不接受组件配置段，违反时启动失败。目标服务需要兼容 Connect 协议。以后该服务有了本地实现，删掉 `WithExternal` 并调整 placement 即可，业务代码不用改。
 
+### 原生 HTTP 组件
+
+接收第三方 HTTP 回调这类非 Connect 请求时，用指令注释声明 HTTP 组件，由 `weaver generate` 生成注册代码：
+
+```go
+//weaver:http pay.Callbacks
+type payCallbacks struct {
+    weaver.WithConfig[PayConfig]
+    Orders weaver.Ref[orderv1weaver.OrderServiceComponent]
+}
+
+//weaver:route POST /callbacks/wechat/pay
+func (c *payCallbacks) wechatPay(w http.ResponseWriter, r *http.Request) { /* 验签后调用 c.Orders.Get() */ }
+
+//weaver:route POST /callbacks/alipay/{scene}
+//weaver:route POST /callbacks/alipay
+func (c *payCallbacks) alipay(w http.ResponseWriter, r *http.Request) { scene := r.PathValue("scene"); _ = scene }
+```
+
+```yaml
+placements:
+  pay.Callbacks: gateway
+
+pay.Callbacks:
+  wechat_key: ${WECHAT_KEY}
+```
+
+- `//weaver:http <name>` 写在结构体上，名称是点分标识符，与 protobuf service 共用 placements 与配置段命名空间。
+- `//weaver:route <pattern>` 写在该结构体的方法上，pattern 使用 `net/http.ServeMux` 语法，一个方法可以声明多条；方法签名必须是 `func(http.ResponseWriter, *http.Request)`。
+- HTTP 组件可以使用 `WithConfig`、`Resource`、`Ref` 和 `Init`/`Shutdown`，但不能匿名嵌入 `Implements[T]`，也不能被其他组件 `Ref`。
+- 路由只挂载在 HTTP 组件 placement 所在的 unit；多 unit 部署时入口网关需要把回调路径转发到该 unit。建议回调组件只做验签和报文转换，业务逻辑经 `Ref` 交给 Service。
+- 非法 pattern、路由冲突、错放或拼错的 `//weaver:` 指令在生成期失败；跨 package 的冲突以及占用 `/<protobuf service 全名>/` 前缀的路由在 Runtime 创建组件前失败。
+- Runtime 为每条路由内置 OpenTelemetry server span、`http.server.request.duration` 耗时指标（按方法、路由、状态码和组件名分组）以及 panic recovery（返回 500）。`WithHTTPMiddleware` 可追加只作用于 HTTP 组件路由的标准库中间件，先注册的位于外层。
+
 组件创建顺序为：严格校验全部组件配置、创建全部本地实例、注入 `WithConfig`/`Resource`/`Ref`、按依赖顺序执行 `Init`、挂载当前 unit 的 Handler。关闭时按相反顺序执行 `Shutdown`。普通资源由调用方管理生命周期。
 
 ## Recovery 与 OpenTelemetry

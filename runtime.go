@@ -115,6 +115,10 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 	if err := runtime.validateHandlerOptions(); err != nil {
 		return nil, err
 	}
+	// 在创建组件前用占位 Handler 校验路由，使非法或冲突的 pattern 不触发任何 Init。
+	if _, err := runtime.buildMux(order, nil, true); err != nil {
+		return nil, err
+	}
 	if err := runtime.decodeComponentConfigs(order); err != nil {
 		return nil, err
 	}
@@ -168,27 +172,85 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 		return nil, errors.Join(err, cleanupErr)
 	}
 
-	mux := http.NewServeMux()
-	paths := make(map[string]string)
-	for _, name := range order {
-		instance, local := runtime.instances[name]
-		if !local {
-			continue
-		}
-		path, handler, err := runtime.registrations[name].Service.newHandler(instance, handlerOptions...)
-		if err != nil {
-			cleanupErr := runtime.shutdownComponents(context.WithoutCancel(ctx))
-			return nil, errors.Join(err, cleanupErr)
-		}
-		if previous, exists := paths[path]; exists {
-			cleanupErr := runtime.shutdownComponents(context.WithoutCancel(ctx))
-			return nil, errors.Join(fmt.Errorf("weaver: 组件 %q 与 %q 使用了相同 Handler 路径 %q", previous, name, path), cleanupErr)
-		}
-		paths[path] = name
-		mux.Handle(path, handler)
+	mux, err := runtime.buildMux(order, handlerOptions, false)
+	if err != nil {
+		cleanupErr := runtime.shutdownComponents(context.WithoutCancel(ctx))
+		return nil, errors.Join(err, cleanupErr)
 	}
 	runtime.handler = mux
 	return runtime, nil
+}
+
+// buildMux 挂载当前 unit 的 Connect handler 与 HTTP 组件路由。
+// validateOnly 为 true 时只做路由校验：Connect 组件按生成代码的 "/<service>/" 前缀占位，
+// HTTP 路由使用空 Handler，不访问组件实例。
+func (r *Runtime) buildMux(order []string, handlerOptions []connect.HandlerOption, validateOnly bool) (*http.ServeMux, error) {
+	placeholder := http.NotFoundHandler()
+	mux := http.NewServeMux()
+	paths := make(map[string]string)
+	for _, name := range order {
+		registration := r.registrations[name]
+		if registration.isHTTP() || r.config.Placements[name] != r.currentUnit {
+			continue
+		}
+		path, handler := "/"+name+"/", placeholder
+		if !validateOnly {
+			var err error
+			path, handler, err = registration.Service.newHandler(r.instances[name], handlerOptions...)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if previous, exists := paths[path]; exists {
+			return nil, fmt.Errorf("weaver: 组件 %q 与 %q 使用了相同 Handler 路径 %q", previous, name, path)
+		}
+		paths[path] = name
+		if err := handleRoute(mux, path, handler); err != nil {
+			return nil, fmt.Errorf("weaver: 挂载组件 %q 的 Handler 失败: %w", name, err)
+		}
+	}
+
+	for _, name := range order {
+		registration := r.registrations[name]
+		if !registration.isHTTP() || r.config.Placements[name] != r.currentUnit {
+			continue
+		}
+		for _, route := range registration.HTTP.Routes {
+			if err := r.checkReservedPath(route.Pattern); err != nil {
+				return nil, fmt.Errorf("weaver: HTTP 组件 %q 的路由 %q 无效: %w", name, route.Pattern, err)
+			}
+			var handler http.Handler = placeholder
+			if !validateOnly {
+				handler = route.Handler(r.instances[name])
+				for index := len(r.options.httpMiddlewares) - 1; index >= 0; index-- {
+					handler = r.options.httpMiddlewares[index](handler)
+					if handler == nil || isNil(handler) {
+						return nil, fmt.Errorf("weaver: HTTP 中间件为路由 %q 返回了 nil", route.Pattern)
+					}
+				}
+				handler = wrapHTTPRoute(name, route.Pattern, handler)
+			}
+			if err := handleRoute(mux, route.Pattern, handler); err != nil {
+				return nil, fmt.Errorf("weaver: HTTP 组件 %q 的路由 %q 无效: %w", name, route.Pattern, err)
+			}
+		}
+	}
+	return mux, nil
+}
+
+// checkReservedPath 禁止 HTTP 路由占用任何 protobuf service 的 Connect 路径，
+// 无论该 service 是否位于当前 unit，避免调整 placement 后出现路由劫持。
+func (r *Runtime) checkReservedPath(pattern string) error {
+	path := routePath(pattern)
+	for name, registration := range r.registrations {
+		if registration.isHTTP() {
+			continue
+		}
+		if strings.HasPrefix(path, "/"+name+"/") {
+			return fmt.Errorf("路径与 protobuf service %q 的 Connect 路径冲突", name)
+		}
+	}
+	return nil
 }
 
 func (r *Runtime) validateHandlerOptions() error {
@@ -292,7 +354,7 @@ func (r *Runtime) componentName(componentType reflect.Type) (string, error) {
 	}
 }
 
-// Handler 返回只包含当前 unit 组件的 HTTP Handler。
+// Handler 返回只包含当前 unit 组件的 HTTP Handler，包括 Connect handler 与 HTTP 组件路由。
 func (r *Runtime) Handler() http.Handler {
 	return r.handler
 }
@@ -396,6 +458,9 @@ func (i runtimeInjector) resolveComponent(name string) (any, error) {
 	registration, exists := runtime.registrations[name]
 	if !exists {
 		return nil, fmt.Errorf("weaver: 依赖了未注册组件 %q", name)
+	}
+	if registration.isHTTP() {
+		return nil, fmt.Errorf("weaver: 组件 %q 是 HTTP 组件，不能通过 Ref 引用", name)
 	}
 	unit := runtime.config.Placements[name]
 	if unit == runtime.currentUnit {

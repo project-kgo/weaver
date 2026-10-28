@@ -5,6 +5,10 @@ placements:
   weaver.example.v1.UpperService: app
   weaver.example.v1.EchoService: app
   weaver.example.v1.LoginService: app
+  weaver.example.Callbacks: app
 
 weaver.example.v1.UpperService:
   prefix: "echo:"
+
+weaver.example.Callbacks:
+  token: "secret"

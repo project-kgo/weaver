@@ -6,12 +6,42 @@ import (
 	sql "database/sql"
 	weaver "github.com/project-kgo/weaver"
 	components "github.com/project-kgo/weaver/internal/generate/testdata/components"
+	http "net/http"
 	reflect "reflect"
 )
 
-var _ [weaver.CodegenVersion]struct{} = [3]struct{}{}
+var _ [weaver.CodegenVersion]struct{} = [4]struct{}{}
 
 func init() {
+	weaver.MustRegister(weaver.Registration{
+		HTTP: weaver.HTTPDescriptor{
+			Name: "test.Callbacks",
+			Routes: []weaver.Route{
+				{Pattern: "GET /callbacks/ping", Handler: func(target any) http.HandlerFunc { return target.(*callbacks).Ping }},
+				{Pattern: "POST /callbacks/pay", Handler: func(target any) http.HandlerFunc { return target.(*callbacks).pay }},
+				{Pattern: "POST /callbacks/pay/{provider}", Handler: func(target any) http.HandlerFunc { return target.(*callbacks).pay }},
+			},
+		},
+		ConfigType: reflect.TypeFor[callbackConfig](),
+		New:        func() any { return new(callbacks) },
+		Inject: func(target any, injector weaver.Injector) error {
+			component := target.(*callbacks)
+			ref0, err := weaver.ResolveComponent[components.UpperComponent](injector, components.Upper.Name)
+			if err != nil {
+				return err
+			}
+			weaver.SetRef(&component.Upper, ref0)
+			config, err := weaver.ResolveConfig[callbackConfig](injector)
+			if err != nil {
+				return err
+			}
+			weaver.SetConfig(&component.WithConfig, config)
+			return nil
+		},
+		Dependencies: []string{
+			components.Upper.Name,
+		},
+	})
 	weaver.MustRegister(weaver.Registration{
 		Service: components.Echo.Descriptor(),
 		New:     func() any { return new(echo) },

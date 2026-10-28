@@ -2,6 +2,7 @@ package echo_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,7 @@ func TestGeneratedCodeEndToEnd(t *testing.T) {
 		server := startUnit(t, "app", config)
 		client := examplev1connect.NewEchoServiceClient(server.Client(), server.URL)
 		assertEchoBehavior(t, client)
+		assertCallbackBehavior(t, server)
 	})
 
 	t.Run("two units", func(t *testing.T) {
@@ -35,7 +37,45 @@ func TestGeneratedCodeEndToEnd(t *testing.T) {
 		gameServer := startUnit(t, "game", config)
 		client := examplev1connect.NewEchoServiceClient(gameServer.Client(), gameServer.URL)
 		assertEchoBehavior(t, client)
+		// 回调组件放在 game，经 Ref 远程调用 core 上的 UpperService；core 不挂载回调路由。
+		assertCallbackBehavior(t, gameServer)
+		if status, _ := postCallback(t, coreServer, "/callbacks/upper/hello", "secret"); status != http.StatusNotFound {
+			t.Fatalf("expected callback route absent on core, got %d", status)
+		}
 	})
+}
+
+func assertCallbackBehavior(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	status, body := postCallback(t, server, "/callbacks/upper/hello", "secret")
+	if status != http.StatusOK || body != "echo:HELLO" {
+		t.Fatalf("unexpected callback response: %d %q", status, body)
+	}
+	if status, _ := postCallback(t, server, "/callbacks/upper/hello", "wrong"); status != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized, got %d", status)
+	}
+	if status, _ := postCallback(t, server, "/callbacks/upper/error", "secret"); status != http.StatusBadGateway {
+		t.Fatalf("expected bad gateway, got %d", status)
+	}
+}
+
+func postCallback(t *testing.T, server *httptest.Server, path, token string) (int, string) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, server.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Callback-Token", token)
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, strings.TrimSpace(string(body))
 }
 
 func TestUnitHandlerSupportsConnectAndGRPC(t *testing.T) {

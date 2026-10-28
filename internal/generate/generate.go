@@ -10,8 +10,10 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,7 +25,15 @@ import (
 const (
 	weaverPackagePath = "github.com/project-kgo/weaver"
 	generatedFilename = "zz_weaver_gen.go"
+	codegenVersion    = 4
+
+	directivePrefix = "//weaver:"
+	httpDirective   = "//weaver:http"
+	routeDirective  = "//weaver:route"
 )
+
+// httpNamePattern 要求 HTTP 组件名称与 protobuf service 全名风格一致，便于作为 YAML 顶层键。
+var httpNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
 
 // Output 是一次生成操作产生的文件变更。
 type Output struct {
@@ -39,6 +49,15 @@ type componentModel struct {
 	config         *fieldModel
 	refs           []fieldModel
 	resources      []fieldModel
+
+	// httpName 非空表示这是 //weaver:http 声明的原生 HTTP 组件，此时 componentType 为空。
+	httpName string
+	routes   []routeModel
+}
+
+type routeModel struct {
+	pattern string
+	method  string
 }
 
 type descriptorModel struct {
@@ -94,8 +113,16 @@ func Generate(ctx context.Context, directory string, patterns ...string) ([]Outp
 			return nil, err
 		}
 		for _, component := range model.components {
-			identity := types.TypeString(component.componentType, func(pkg *types.Package) string { return pkg.Path() })
 			location := model.path + "." + component.implementation
+			if component.httpName != "" {
+				identity := "http:" + component.httpName
+				if previous, exists := seenComponents[identity]; exists {
+					return nil, fmt.Errorf("weaver generate: HTTP 组件名称 %s 同时由 %s 和 %s 声明", component.httpName, previous, location)
+				}
+				seenComponents[identity] = location
+				continue
+			}
+			identity := types.TypeString(component.componentType, func(pkg *types.Package) string { return pkg.Path() })
 			if previous, exists := seenComponents[identity]; exists {
 				return nil, fmt.Errorf("weaver generate: 组件接口 %s 同时由 %s 和 %s 实现", identity, previous, location)
 			}
@@ -182,6 +209,11 @@ func scanPackage(loaded *packages.Package) (packageModel, error) {
 		return model, nil
 	}
 
+	directives, err := scanDirectives(loaded)
+	if err != nil {
+		return packageModel{}, err
+	}
+
 	scope := loaded.Types.Scope()
 	for _, name := range scope.Names() {
 		object, ok := scope.Lookup(name).(*types.TypeName)
@@ -200,14 +232,175 @@ func scanPackage(loaded *packages.Package) (packageModel, error) {
 		if err != nil {
 			return packageModel{}, fmt.Errorf("weaver generate: %s.%s: %w", loaded.PkgPath, object.Name(), err)
 		}
+		if httpName, exists := directives.httpNames[object.Name()]; exists {
+			if found {
+				return packageModel{}, fmt.Errorf("weaver generate: %s.%s: HTTP 组件不能同时声明 Implements[T]，需要共享逻辑时请通过 Ref[T] 调用", loaded.PkgPath, object.Name())
+			}
+			component.httpName = httpName
+			component.routes = directives.routes[object.Name()]
+			if len(component.routes) == 0 {
+				return packageModel{}, fmt.Errorf("weaver generate: %s.%s: HTTP 组件 %s 没有任何 //weaver:route 路由", loaded.PkgPath, object.Name(), httpName)
+			}
+			found = true
+		}
 		if found {
 			model.components = append(model.components, component)
+		}
+	}
+	for typeName := range directives.routes {
+		if _, exists := directives.httpNames[typeName]; !exists {
+			return packageModel{}, fmt.Errorf("weaver generate: %s.%s: 声明了 //weaver:route，但类型缺少 //weaver:http", loaded.PkgPath, typeName)
 		}
 	}
 	sort.Slice(model.components, func(left, right int) bool {
 		return model.components[left].implementation < model.components[right].implementation
 	})
+	if err := validateRoutes(model.components); err != nil {
+		return packageModel{}, fmt.Errorf("weaver generate: %s: %w", loaded.PkgPath, err)
+	}
 	return model, nil
+}
+
+type directiveModel struct {
+	httpNames map[string]string
+	routes    map[string][]routeModel
+}
+
+// scanDirectives 读取 //weaver:http 与 //weaver:route 指令。
+// 所有 //weaver: 注释都必须被识别并落在合法位置，避免拼写错误或错放的指令被静默忽略。
+func scanDirectives(loaded *packages.Package) (directiveModel, error) {
+	result := directiveModel{
+		httpNames: make(map[string]string),
+		routes:    make(map[string][]routeModel),
+	}
+	fileSet := loaded.Fset
+	for _, file := range loaded.Syntax {
+		consumed := make(map[*ast.Comment]bool)
+		for _, declaration := range file.Decls {
+			switch declaration := declaration.(type) {
+			case *ast.GenDecl:
+				if declaration.Tok != token.TYPE {
+					continue
+				}
+				for _, spec := range declaration.Specs {
+					typeSpec := spec.(*ast.TypeSpec)
+					doc := typeSpec.Doc
+					if doc == nil && !declaration.Lparen.IsValid() {
+						doc = declaration.Doc
+					}
+					for _, comment := range directiveComments(doc, httpDirective) {
+						consumed[comment] = true
+						position := fileSet.Position(comment.Pos())
+						if _, ok := typeSpec.Type.(*ast.StructType); !ok || typeSpec.TypeParams != nil {
+							return directiveModel{}, fmt.Errorf("weaver generate: %s: //weaver:http 只能用于非泛型结构体", position)
+						}
+						if _, exists := result.httpNames[typeSpec.Name.Name]; exists {
+							return directiveModel{}, fmt.Errorf("weaver generate: %s: 类型 %s 重复声明 //weaver:http", position, typeSpec.Name.Name)
+						}
+						name := directiveArgument(comment.Text, httpDirective)
+						if !httpNamePattern.MatchString(name) {
+							return directiveModel{}, fmt.Errorf("weaver generate: %s: HTTP 组件名称 %q 无效，应为点分标识符，例如 pay.Callbacks", position, name)
+						}
+						result.httpNames[typeSpec.Name.Name] = name
+					}
+				}
+			case *ast.FuncDecl:
+				comments := directiveComments(declaration.Doc, routeDirective)
+				if len(comments) == 0 {
+					continue
+				}
+				position := fileSet.Position(comments[0].Pos())
+				for _, comment := range comments {
+					consumed[comment] = true
+				}
+				function, ok := loaded.TypesInfo.Defs[declaration.Name].(*types.Func)
+				if !ok || declaration.Recv == nil {
+					return directiveModel{}, fmt.Errorf("weaver generate: %s: //weaver:route 只能用于方法", position)
+				}
+				signature := function.Type().(*types.Signature)
+				receiver := signature.Recv().Type()
+				if pointer, ok := receiver.(*types.Pointer); ok {
+					receiver = pointer.Elem()
+				}
+				named, ok := receiver.(*types.Named)
+				if !ok {
+					return directiveModel{}, fmt.Errorf("weaver generate: %s: //weaver:route 的接收者类型无效", position)
+				}
+				if !isHTTPHandlerSignature(signature) {
+					return directiveModel{}, fmt.Errorf("weaver generate: %s: 方法 %s.%s 的签名必须是 func(http.ResponseWriter, *http.Request)", position, named.Obj().Name(), function.Name())
+				}
+				for _, comment := range comments {
+					pattern := directiveArgument(comment.Text, routeDirective)
+					if pattern == "" {
+						return directiveModel{}, fmt.Errorf("weaver generate: %s: //weaver:route 缺少路由 pattern", fileSet.Position(comment.Pos()))
+					}
+					typeName := named.Obj().Name()
+					result.routes[typeName] = append(result.routes[typeName], routeModel{pattern: pattern, method: function.Name()})
+				}
+			}
+		}
+		for _, group := range file.Comments {
+			for _, comment := range group.List {
+				if strings.HasPrefix(comment.Text, directivePrefix) && !consumed[comment] {
+					return directiveModel{}, fmt.Errorf("weaver generate: %s: 无法识别或位置无效的指令 %q", fileSet.Position(comment.Pos()), comment.Text)
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
+func directiveComments(group *ast.CommentGroup, directive string) []*ast.Comment {
+	if group == nil {
+		return nil
+	}
+	var result []*ast.Comment
+	for _, comment := range group.List {
+		if comment.Text == directive || strings.HasPrefix(comment.Text, directive+" ") || strings.HasPrefix(comment.Text, directive+"\t") {
+			result = append(result, comment)
+		}
+	}
+	return result
+}
+
+func directiveArgument(text, directive string) string {
+	return strings.TrimSpace(strings.TrimPrefix(text, directive))
+}
+
+func isHTTPHandlerSignature(signature *types.Signature) bool {
+	if signature.Variadic() || signature.Params().Len() != 2 || signature.Results().Len() != 0 {
+		return false
+	}
+	return isNetHTTPType(signature.Params().At(0).Type(), "ResponseWriter") && isPointerToNetHTTPType(signature.Params().At(1).Type(), "Request")
+}
+
+func isPointerToNetHTTPType(value types.Type, name string) bool {
+	pointer, ok := types.Unalias(value).(*types.Pointer)
+	return ok && isNetHTTPType(pointer.Elem(), name)
+}
+
+func isNetHTTPType(value types.Type, name string) bool {
+	named, ok := types.Unalias(value).(*types.Named)
+	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "net/http" && named.Obj().Name() == name
+}
+
+// validateRoutes 复用 net/http.ServeMux 的 pattern 解析与冲突检测，
+// 在生成期发现同一 package 内的非法或冲突路由；跨 package 冲突由 Runtime 启动时检查。
+func validateRoutes(components []componentModel) (err error) {
+	mux := http.NewServeMux()
+	var current string
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("%s: %v", current, recovered)
+		}
+	}()
+	for _, component := range components {
+		for _, route := range component.routes {
+			current = fmt.Sprintf("HTTP 组件 %s 的路由 %q", component.httpName, route.pattern)
+			mux.Handle(route.pattern, http.NotFoundHandler())
+		}
+	}
+	return nil
 }
 
 func scanComponent(implementation string, structure *types.Struct) (componentModel, bool, error) {
@@ -367,14 +560,23 @@ func renderPackage(model packageModel) ([]byte, error) {
 			break
 		}
 	}
+	for _, component := range model.components {
+		if component.httpName != "" {
+			imports.reserve("net/http", "http")
+			break
+		}
+	}
 	var body bytes.Buffer
-	body.WriteString("var _ [weaver.CodegenVersion]struct{} = [3]struct{}{}\n\n")
+	fmt.Fprintf(&body, "var _ [weaver.CodegenVersion]struct{} = [%d]struct{}{}\n\n", codegenVersion)
 	body.WriteString("func init() {\n")
 	for _, component := range model.components {
 		renderRegistration(&body, imports, component)
 	}
 	body.WriteString("}\n\n")
 	for _, component := range model.components {
+		if component.httpName != "" {
+			continue
+		}
 		componentType := types.TypeString(component.componentType, imports.qualifier)
 		fmt.Fprintf(&body, "var _ %s = (*%s)(nil)\n", componentType, component.implementation)
 	}
@@ -405,9 +607,12 @@ func renderPackage(model packageModel) ([]byte, error) {
 }
 
 func renderRegistration(output *bytes.Buffer, imports *importManager, component componentModel) {
-	descriptor := imports.descriptor(component.descriptor)
 	fmt.Fprintln(output, "\tweaver.MustRegister(weaver.Registration{")
-	fmt.Fprintf(output, "\t\tService: %s.Descriptor(),\n", descriptor)
+	if component.httpName != "" {
+		renderHTTPDescriptor(output, imports, component)
+	} else {
+		fmt.Fprintf(output, "\t\tService: %s.Descriptor(),\n", imports.descriptor(component.descriptor))
+	}
 	if component.config != nil {
 		typeName := types.TypeString(component.config.valueType, imports.qualifier)
 		fmt.Fprintf(output, "\t\tConfigType: %s.TypeFor[%s](),\n", imports.byPath["reflect"], typeName)
@@ -463,6 +668,24 @@ func renderRegistration(output *bytes.Buffer, imports *importManager, component 
 		fmt.Fprintln(output, "\t\t},")
 	}
 	fmt.Fprintln(output, "\t})")
+}
+
+func renderHTTPDescriptor(output *bytes.Buffer, imports *importManager, component componentModel) {
+	routes := append([]routeModel(nil), component.routes...)
+	sort.Slice(routes, func(left, right int) bool { return routes[left].pattern < routes[right].pattern })
+	httpAlias := imports.byPath["net/http"]
+	fmt.Fprintln(output, "\t\tHTTP: weaver.HTTPDescriptor{")
+	fmt.Fprintf(output, "\t\t\tName: %q,\n", component.httpName)
+	fmt.Fprintln(output, "\t\t\tRoutes: []weaver.Route{")
+	for _, route := range routes {
+		fmt.Fprintf(
+			output,
+			"\t\t\t\t{Pattern: %q, Handler: func(target any) %s.HandlerFunc { return target.(*%s).%s }},\n",
+			route.pattern, httpAlias, component.implementation, route.method,
+		)
+	}
+	fmt.Fprintln(output, "\t\t\t},")
+	fmt.Fprintln(output, "\t\t},")
 }
 
 func sanitizeIdentifier(value string) string {

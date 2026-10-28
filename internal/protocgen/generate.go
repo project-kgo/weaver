@@ -47,7 +47,7 @@ func generateFile(plugin *protogen.Plugin, file *protogen.File) {
 	generated.P()
 	generated.P("package ", packageName)
 	generated.P()
-	generated.P("var _ [", generated.QualifiedGoIdent(weaverImportPath.Ident("CodegenVersion")), "]struct{} = [3]struct{}{}")
+	generated.P("var _ [", generated.QualifiedGoIdent(weaverImportPath.Ident("CodegenVersion")), "]struct{} = [4]struct{}{}")
 	generated.P()
 
 	for _, service := range file.Services {

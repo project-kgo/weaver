@@ -11,7 +11,7 @@ import (
 	http "net/http"
 )
 
-var _ [weaver.CodegenVersion]struct{} = [3]struct{}{}
+var _ [weaver.CodegenVersion]struct{} = [4]struct{}{}
 
 const EchoServiceName = "test.v1.EchoService"
 

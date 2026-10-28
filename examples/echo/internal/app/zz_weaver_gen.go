@@ -5,12 +5,40 @@ package app
 import (
 	weaver "github.com/project-kgo/weaver"
 	examplev1weaver "github.com/project-kgo/weaver/examples/echo/gen/example/v1/examplev1weaver"
+	http "net/http"
 	reflect "reflect"
 )
 
-var _ [weaver.CodegenVersion]struct{} = [3]struct{}{}
+var _ [weaver.CodegenVersion]struct{} = [4]struct{}{}
 
 func init() {
+	weaver.MustRegister(weaver.Registration{
+		HTTP: weaver.HTTPDescriptor{
+			Name: "weaver.example.Callbacks",
+			Routes: []weaver.Route{
+				{Pattern: "POST /callbacks/upper/{value}", Handler: func(target any) http.HandlerFunc { return target.(*callbacks).upper }},
+			},
+		},
+		ConfigType: reflect.TypeFor[CallbackSettings](),
+		New:        func() any { return new(callbacks) },
+		Inject: func(target any, injector weaver.Injector) error {
+			component := target.(*callbacks)
+			ref0, err := weaver.ResolveComponent[examplev1weaver.UpperServiceComponent](injector, examplev1weaver.UpperService.Name)
+			if err != nil {
+				return err
+			}
+			weaver.SetRef(&component.Upper, ref0)
+			config, err := weaver.ResolveConfig[CallbackSettings](injector)
+			if err != nil {
+				return err
+			}
+			weaver.SetConfig(&component.WithConfig, config)
+			return nil
+		},
+		Dependencies: []string{
+			examplev1weaver.UpperService.Name,
+		},
+	})
 	weaver.MustRegister(weaver.Registration{
 		Service: examplev1weaver.EchoService.Descriptor(),
 		New:     func() any { return new(echoService) },

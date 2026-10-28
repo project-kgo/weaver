@@ -21,14 +21,15 @@ func (f optionFunc) apply(options *runtimeOptions) error {
 }
 
 type runtimeOptions struct {
-	registry       *Registry
-	resources      map[reflect.Type]any
-	resolvers      map[string]Resolver
-	httpClient     connect.HTTPClient
-	clientOptions  []connect.ClientOption
-	handlerOptions []handlerOption
-	shutdownHooks  []ShutdownHook
-	externals      []ServiceDescriptor
+	registry        *Registry
+	resources       map[reflect.Type]any
+	resolvers       map[string]Resolver
+	httpClient      connect.HTTPClient
+	clientOptions   []connect.ClientOption
+	handlerOptions  []handlerOption
+	shutdownHooks   []ShutdownHook
+	externals       []ServiceDescriptor
+	httpMiddlewares []HTTPMiddleware
 }
 
 // handlerOption 延迟需要组件代理的 Handler 配置，确保它与普通配置保持注册顺序。
@@ -185,6 +186,20 @@ func WithHandlerInterceptor[T any](factory func(T) connect.Interceptor) Option {
 				return interceptor, nil
 			},
 		})
+		return nil
+	})
+}
+
+// WithHTTPMiddleware 设置当前 unit 所有 HTTP 组件路由的中间件，不作用于 Connect handler。
+// 多次调用按注册顺序追加，先注册的位于外层；内置 recovery 会覆盖这些中间件中的 panic。
+func WithHTTPMiddleware(values ...HTTPMiddleware) Option {
+	return optionFunc(func(options *runtimeOptions) error {
+		for _, value := range values {
+			if value == nil {
+				return fmt.Errorf("weaver: HTTP 中间件不能为空")
+			}
+		}
+		options.httpMiddlewares = append(options.httpMiddlewares, values...)
 		return nil
 	})
 }

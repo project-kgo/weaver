@@ -65,6 +65,30 @@ func TestGenerateRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestGenerateRejectsInvalidHTTPComponent(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{pattern: "./internal/generate/testdata/invalid_http_signature", want: "签名必须是 func(http.ResponseWriter, *http.Request)"},
+		{pattern: "./internal/generate/testdata/invalid_http_name", want: "HTTP 组件名称 \"test/bad\" 无效"},
+		{pattern: "./internal/generate/testdata/invalid_http_implements", want: "HTTP 组件不能同时声明 Implements[T]"},
+		{pattern: "./internal/generate/testdata/invalid_http_no_routes", want: "没有任何 //weaver:route 路由"},
+		{pattern: "./internal/generate/testdata/invalid_http_orphan_route", want: "类型缺少 //weaver:http"},
+		{pattern: "./internal/generate/testdata/invalid_http_conflict", want: "conflicts with pattern"},
+		{pattern: "./internal/generate/testdata/invalid_http_unknown_directive", want: "无法识别或位置无效的指令"},
+		{pattern: "./internal/generate/testdata/invalid_http_function", want: "//weaver:route 只能用于方法"},
+	}
+	for _, test := range tests {
+		t.Run(filepath.Base(test.pattern), func(t *testing.T) {
+			_, err := Generate(context.Background(), repositoryRoot(t), test.pattern)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
 func TestWriteAtomicAndRemove(t *testing.T) {
 	directory := t.TempDir()
 	filename := filepath.Join(directory, generatedFilename)

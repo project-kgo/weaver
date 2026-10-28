@@ -11,6 +11,8 @@ import (
 	http "net/http"
 )
 
+var _ [weaver.CodegenVersion]struct{} = [4]struct{}{}
+
 const LoginServiceName = "weaver.example.v1.LoginService"
 
 type LoginServiceComponent interface {
@@ -34,10 +36,19 @@ type loginServiceLocalClient struct {
 	implementation LoginServiceComponent
 }
 
-func (client *loginServiceLocalClient) Login(ctx context.Context, request *v1.LoginRequest) (*v1.LoginResponse, error) {
-	response, err := client.implementation.Login(ctx, request)
-	if err != nil {
-		return nil, weaver.NormalizeError(err)
-	}
-	return response, nil
+func (client *loginServiceLocalClient) Login(ctx context.Context, request *v1.LoginRequest) (response *v1.LoginResponse, err error) {
+	ctx, call := weaver.BeginLocalCall(ctx, "/weaver.example.v1.LoginService/Login")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			response = nil
+			err = weaver.RecoverPanic(ctx, "/weaver.example.v1.LoginService/Login", recovered)
+		}
+		err = weaver.NormalizeError(err)
+		if err != nil {
+			response = nil
+		}
+		call.End(err)
+	}()
+	response, err = client.implementation.Login(ctx, request)
+	return response, err
 }
