@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -226,12 +227,22 @@ func TestHTTPRouteTelemetry(t *testing.T) {
 			t.Fatalf("unexpected metric type %T", value.Data)
 		}
 		for _, point := range histogram.DataPoints {
+			if !slices.Equal(point.Bounds, durationBuckets) {
+				t.Fatalf("unexpected histogram bounds: %v", point.Bounds)
+			}
 			route, _ := point.Attributes.Value("http.route")
 			status, _ := point.Attributes.Value("http.response.status_code")
-			points[route.AsString()+" "+status.Emit()] += int64(point.Count)
+			scheme, _ := point.Attributes.Value("url.scheme")
+			errorType, _ := point.Attributes.Value("error.type")
+			key := scheme.AsString() + " " + route.AsString() + " " + status.Emit()
+			if errorType.AsString() != "" {
+				key += " " + errorType.AsString()
+			}
+			points[key] += int64(point.Count)
 		}
 	}
-	for _, key := range []string{"POST /callbacks/upper/{value} 200", "POST /callbacks/panic 500"} {
+	// http.route 只包含路径模板；5xx 额外携带 error.type。
+	for _, key := range []string{"http /callbacks/upper/{value} 200", "http /callbacks/panic 500 500"} {
 		if points[key] == 0 {
 			t.Fatalf("metric point %q not recorded: %v", key, points)
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -72,18 +74,31 @@ func handleRoute(mux *http.ServeMux, pattern string, handler http.Handler) (err 
 // wrapHTTPRoute 为 HTTP 组件路由加上与 Connect handler 对齐的 tracing 和 panic recovery。
 // 内置包装位于最外层，业务中间件中的 panic 同样会被恢复。
 func wrapHTTPRoute(component, pattern string, handler http.Handler) http.Handler {
+	// 语义约定要求 http.route 只包含路径模板，方法和主机名分别由其他属性表达。
+	route := routePath(pattern)
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		started := time.Now()
+		method := normalizeHTTPMethod(request.Method)
+		scheme := "http"
+		if request.TLS != nil {
+			scheme = "https"
+		}
 		attributes := []attribute.KeyValue{
-			attribute.String("http.request.method", normalizeHTTPMethod(request.Method)),
-			attribute.String("http.route", pattern),
+			semconv.HTTPRequestMethodKey.String(method),
+			semconv.HTTPRouteKey.String(route),
+			semconv.URLSchemeKey.String(scheme),
 			attribute.String("weaver.component", component),
+		}
+		spanName := method + " " + route
+		if method == "_OTHER" {
+			spanName = "HTTP " + route
 		}
 		ctx, span := otel.Tracer(telemetryInstrumentationName).Start(
 			request.Context(),
-			pattern,
+			spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attributes...),
+			trace.WithAttributes(semconv.URLPathKey.String(request.URL.Path)),
 		)
 		recorder := &statusRecorder{ResponseWriter: writer}
 		defer func() {
@@ -102,16 +117,19 @@ func wrapHTTPRoute(component, pattern string, handler http.Handler) http.Handler
 			if status == 0 {
 				status = http.StatusOK
 			}
-			statusAttribute := attribute.Int("http.response.status_code", status)
-			span.SetAttributes(statusAttribute)
+			result := []attribute.KeyValue{semconv.HTTPResponseStatusCodeKey.Int(status)}
 			if status >= http.StatusInternalServerError {
+				// 服务端只把 5xx 视为错误，error.type 使用状态码字符串。
+				result = append(result, semconv.ErrorTypeKey.String(strconv.Itoa(status)))
 				span.SetStatus(codes.Error, http.StatusText(status))
 			}
+			span.SetAttributes(result...)
+			attributes = append(attributes, result...)
 			if duration := httpRouteDuration(); duration != nil {
 				duration.Record(
 					context.WithoutCancel(ctx),
 					time.Since(started).Seconds(),
-					metric.WithAttributes(append(attributes, statusAttribute)...),
+					metric.WithAttributes(attributes...),
 				)
 			}
 			span.End()
@@ -126,6 +144,7 @@ func httpRouteDuration() metric.Float64Histogram {
 			"http.server.request.duration",
 			metric.WithUnit("s"),
 			metric.WithDescription("HTTP 组件路由请求耗时"),
+			metric.WithExplicitBucketBoundaries(durationBuckets...),
 		)
 		if err != nil {
 			slog.Error("weaver: 创建 HTTP 路由指标失败", "error", err)

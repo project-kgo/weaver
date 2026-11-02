@@ -59,7 +59,6 @@ func New(ctx context.Context, currentUnit string, config Config, values ...Optio
 	}
 	telemetryInterceptor, err := otelconnect.NewInterceptor(
 		otelconnect.WithTrustRemote(),
-		otelconnect.WithoutServerPeerAttributes(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("weaver: 创建 OpenTelemetry 中间件失败: %w", err)

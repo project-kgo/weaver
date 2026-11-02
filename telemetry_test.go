@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,7 +66,7 @@ func TestLocalCallTelemetryAndRecovery(t *testing.T) {
 			invoke: upperFunc(func(_ context.Context, request *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
 				return wrapperspb.String(strings.ToUpper(request.Value)), nil
 			}),
-			wantResult: "ok",
+			wantResult: "OK",
 		},
 		{
 			name: "error",
@@ -74,7 +75,7 @@ func TestLocalCallTelemetryAndRecovery(t *testing.T) {
 				return wrapperspb.String("invalid"), errors.New("local failure")
 			}),
 			wantCode:   connect.CodeUnknown,
-			wantResult: connect.CodeUnknown.String(),
+			wantResult: rpcStatusCode(connect.CodeUnknown),
 			wantStatus: codes.Error,
 			wantEvent:  true,
 		},
@@ -84,7 +85,7 @@ func TestLocalCallTelemetryAndRecovery(t *testing.T) {
 				panic("local panic detail")
 			}),
 			wantCode:   connect.CodeInternal,
-			wantResult: connect.CodeInternal.String(),
+			wantResult: rpcStatusCode(connect.CodeInternal),
 			wantStatus: codes.Error,
 			wantEvent:  true,
 			wantLog:    true,
@@ -101,7 +102,7 @@ func TestLocalCallTelemetryAndRecovery(t *testing.T) {
 				return ctx
 			},
 			wantCode:   connect.CodeCanceled,
-			wantResult: connect.CodeCanceled.String(),
+			wantResult: rpcStatusCode(connect.CodeCanceled),
 			wantStatus: codes.Error,
 			wantEvent:  true,
 		},
@@ -117,7 +118,7 @@ func TestLocalCallTelemetryAndRecovery(t *testing.T) {
 				return ctx
 			},
 			wantCode:   connect.CodeDeadlineExceeded,
-			wantResult: connect.CodeDeadlineExceeded.String(),
+			wantResult: rpcStatusCode(connect.CodeDeadlineExceeded),
 			wantStatus: codes.Error,
 			wantEvent:  true,
 		},
@@ -140,7 +141,7 @@ func TestLocalCallTelemetryAndRecovery(t *testing.T) {
 			if request.Value != "hello" {
 				t.Fatalf("request was modified: %q", request.Value)
 			}
-			if err == nil && test.wantResult != "ok" {
+			if err == nil && test.wantResult != "OK" {
 				t.Fatalf("expected error code %v", test.wantCode)
 			}
 			if err != nil && connect.CodeOf(err) != test.wantCode {
@@ -164,7 +165,7 @@ func TestLocalCallTelemetryAndRecovery(t *testing.T) {
 			if span.Status().Code != test.wantStatus {
 				t.Fatalf("unexpected span status: %v", span.Status())
 			}
-			if got := spanAttribute(span.Attributes(), "weaver.status_code"); got != test.wantResult {
+			if got := spanAttribute(span.Attributes(), "rpc.response.status_code"); got != test.wantResult {
 				t.Fatalf("unexpected span result %q", got)
 			}
 			if hasSpanEvent(span, "exception") != test.wantEvent {
@@ -277,8 +278,8 @@ func TestCrossUnitTelemetryAndInterceptorOrder(t *testing.T) {
 			t.Fatalf("server span %s is not a child of a client span", serverSpan.SpanContext().SpanID())
 		}
 	}
-	assertMetricExists(t, "rpc.client.duration")
-	assertMetricExists(t, "rpc.server.duration")
+	assertMetricExists(t, "rpc.client.call.duration")
+	assertMetricExists(t, "rpc.server.call.duration")
 }
 
 func TestCustomInterceptorsDoNotRunForLocalCalls(t *testing.T) {
@@ -482,9 +483,23 @@ func assertHistogramPoint(t *testing.T, name, result string) {
 			t.Fatalf("metric %q has unexpected type %T", name, metric.Data)
 		}
 		for _, point := range histogram.DataPoints {
-			if value, ok := point.Attributes.Value(attribute.Key("weaver.status_code")); ok && value.AsString() == result && point.Count > 0 {
-				return
+			if !slices.Equal(point.Bounds, durationBuckets) {
+				t.Fatalf("metric %q has unexpected bounds: %v", name, point.Bounds)
 			}
+			value, ok := point.Attributes.Value(attribute.Key("rpc.response.status_code"))
+			if !ok || value.AsString() != result || point.Count == 0 {
+				continue
+			}
+			// 失败调用必须携带与结果码一致的 error.type，成功调用不得携带。
+			errorType, _ := point.Attributes.Value(attribute.Key("error.type"))
+			want := result
+			if result == statusCodeOK {
+				want = ""
+			}
+			if errorType.AsString() != want {
+				t.Fatalf("metric %q has unexpected error.type %q", name, errorType.AsString())
+			}
+			return
 		}
 	}
 	t.Fatalf("metric %q has no point for result %q", name, result)

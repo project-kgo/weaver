@@ -15,12 +15,20 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
-const telemetryInstrumentationName = "github.com/project-kgo/weaver"
+const (
+	telemetryInstrumentationName = "github.com/project-kgo/weaver"
+	statusCodeOK                 = "OK"
+)
 
 var recoveredPanicError = errors.New("weaver: internal error")
+
+// durationBuckets 是 OpenTelemetry 语义约定为秒级耗时直方图推荐的分桶边界。
+// SDK 默认分桶面向毫秒，秒级数据几乎全部落入第一个桶，因此创建直方图时必须显式指定。
+var durationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10}
 
 var localCallMetrics struct {
 	sync.Once
@@ -32,30 +40,26 @@ type LocalCall struct {
 	ctx     context.Context
 	span    trace.Span
 	started time.Time
-	service string
 	method  string
 }
 
 // BeginLocalCall 开始一次同 unit 组件调用，仅供生成代码使用。
 func BeginLocalCall(ctx context.Context, procedure string) (context.Context, *LocalCall) {
-	name, service, method := splitProcedure(procedure)
-	attributes := []attribute.KeyValue{
-		attribute.String("rpc.system", "weaver"),
-		attribute.String("rpc.service", service),
-		attribute.String("rpc.method", method),
-		attribute.Bool("weaver.local", true),
-	}
+	// rpc.method 与 otelconnect 一致使用 "包名.Service/Method"，使同一方法在本地和远程部署下可按相同维度聚合。
+	method := strings.TrimLeft(strings.TrimSpace(procedure), "/")
 	ctx, span := otel.Tracer(telemetryInstrumentationName).Start(
 		ctx,
-		name,
+		method,
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(attributes...),
+		trace.WithAttributes(
+			semconv.RPCMethodKey.String(method),
+			attribute.Bool("weaver.local", true),
+		),
 	)
 	return ctx, &LocalCall{
 		ctx:     ctx,
 		span:    span,
 		started: time.Now(),
-		service: service,
 		method:  method,
 	}
 }
@@ -65,26 +69,27 @@ func (call *LocalCall) End(err error) {
 	if call == nil {
 		return
 	}
-	result := "ok"
-	if err != nil {
-		result = connect.CodeOf(err).String()
+	attributes := []attribute.KeyValue{semconv.RPCMethodKey.String(call.method)}
+	if err == nil {
+		attributes = append(attributes, semconv.RPCResponseStatusCodeKey.String(statusCodeOK))
+	} else {
+		code := rpcStatusCode(connect.CodeOf(err))
+		attributes = append(attributes,
+			semconv.RPCResponseStatusCodeKey.String(code),
+			semconv.ErrorTypeKey.String(code),
+		)
 		if !errors.Is(err, recoveredPanicError) {
 			call.span.RecordError(err)
 		}
-		call.span.SetStatus(codes.Error, result)
+		call.span.SetStatus(codes.Error, code)
 	}
-	call.span.SetAttributes(attribute.String("weaver.status_code", result))
+	call.span.SetAttributes(attributes[1:]...)
 
-	metricAttributes := []attribute.KeyValue{
-		attribute.String("rpc.service", call.service),
-		attribute.String("rpc.method", call.method),
-		attribute.String("weaver.status_code", result),
-	}
 	if duration := localCallDuration(); duration != nil {
 		duration.Record(
 			context.WithoutCancel(call.ctx),
 			time.Since(call.started).Seconds(),
-			metric.WithAttributes(metricAttributes...),
+			metric.WithAttributes(attributes...),
 		)
 	}
 	call.span.End()
@@ -117,6 +122,7 @@ func localCallDuration() metric.Float64Histogram {
 			"weaver.local.call.duration",
 			metric.WithUnit("s"),
 			metric.WithDescription("同 unit 组件调用耗时"),
+			metric.WithExplicitBucketBoundaries(durationBuckets...),
 		)
 		if err != nil {
 			slog.Error("weaver: 创建本地调用指标失败", "error", err)
@@ -127,12 +133,7 @@ func localCallDuration() metric.Float64Histogram {
 	return localCallMetrics.duration
 }
 
-func splitProcedure(procedure string) (name, service, method string) {
-	name = strings.TrimLeft(strings.TrimSpace(procedure), "/")
-	service, method, _ = strings.Cut(name, "/")
-	if method == "" {
-		method = service
-		service = ""
-	}
-	return name, service, method
+// rpcStatusCode 与 otelconnect 保持一致，使用 gRPC 风格的大写结果码，例如 DEADLINE_EXCEEDED。
+func rpcStatusCode(code connect.Code) string {
+	return strings.ToUpper(code.String())
 }

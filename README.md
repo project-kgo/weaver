@@ -196,7 +196,7 @@ pay.Callbacks:
 - HTTP 组件可以使用 `WithConfig`、`Resource`、`Ref` 和 `Init`/`Shutdown`，但不能匿名嵌入 `Implements[T]`，也不能被其他组件 `Ref`。
 - 路由只挂载在 HTTP 组件 placement 所在的 unit；多 unit 部署时入口网关需要把回调路径转发到该 unit。建议回调组件只做验签和报文转换，业务逻辑经 `Ref` 交给 Service。
 - 非法 pattern、路由冲突、错放或拼错的 `//weaver:` 指令在生成期失败；跨 package 的冲突以及占用 `/<protobuf service 全名>/` 前缀的路由在 Runtime 创建组件前失败。
-- Runtime 为每条路由内置 OpenTelemetry server span、`http.server.request.duration` 耗时指标（按方法、路由、状态码和组件名分组）以及 panic recovery（返回 500）。`WithHTTPMiddleware` 可追加只作用于 HTTP 组件路由的标准库中间件，先注册的位于外层。
+- Runtime 为每条路由内置 OpenTelemetry server span、`http.server.request.duration` 耗时指标（按 `http.request.method`、`http.route`、`url.scheme`、`http.response.status_code`、5xx 时的 `error.type` 和 `weaver.component` 分组，`http.route` 只包含路径模板）以及 panic recovery（返回 500）。`WithHTTPMiddleware` 可追加只作用于 HTTP 组件路由的标准库中间件，先注册的位于外层。
 
 组件创建顺序为：严格校验全部组件配置、创建全部本地实例、注入 `WithConfig`/`Resource`/`Ref`、按依赖顺序执行 `Init`、挂载当前 unit 的 Handler。关闭时按相反顺序执行 `Shutdown`。普通资源由调用方管理生命周期。
 
@@ -219,11 +219,11 @@ otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 defer tracerProvider.Shutdown(context.Background())
 ```
 
-业务可以传入 `sdktrace.WithSampler` 覆盖默认采样策略。Provider 只负责 trace，MeterProvider、Propagator、Exporter 的创建和关闭仍由应用负责。
+业务可以传入 `sdktrace.WithSampler` 覆盖默认采样策略。
 
-跨 unit Connect 调用同时生成 client/server span 和标准 RPC 指标。unit 之间按内部服务处理并信任传播的 trace context，使 server span 成为 client span 的子节点；因此对外暴露 `Runtime.Handler()` 时，应用必须在外围完成可信边界、鉴权和流量隔离。服务端 peer 地址不会写入埋点，避免临时端口形成高基数。
+跨 unit Connect 调用同时生成 client/server span 和上述 RPC 指标。unit 之间按内部服务处理并信任传播的 trace context，使 server span 成为 client span 的子节点；因此对外暴露 `Runtime.Handler()` 时，应用必须在外围完成可信边界、鉴权和流量隔离。服务端 peer 地址不会写入埋点，避免临时端口形成高基数。
 
-同 unit 调用由生成的本地代理直接完成 recovery 和埋点，不经过 Connect interceptor。每次调用生成一个 INTERNAL span，以及名为 `weaver.local.call.duration`、单位为秒的耗时直方图。span 和指标只使用 protobuf service、method 与有限的 Connect 结果码作为维度。
+同 unit 调用由生成的本地代理直接完成 recovery 和埋点，不经过 Connect interceptor。每次调用生成一个 INTERNAL span 和 `weaver.local.call.duration` 耗时直方图。span 和指标只使用 `rpc.method` 与有限的结果码作为维度。
 
 组件实现或 Handler interceptor 发生 panic 时，调用方只会收到 `connect.CodeInternal`，不会看到 panic 内容。Weaver 会通过 `slog.Default()` 记录 procedure、panic 原因和堆栈，并向当前 span 写入 exception 事件；日志输出与生命周期仍由应用配置。
 
@@ -290,6 +290,36 @@ go tool pprof -http=127.0.0.1:8083 'http://127.0.0.1:6060/debug/pprof/heap'
 ```
 
 空闲调试服务仅有监听器和少量 HTTP 服务开销，不会持续进行 CPU profiling 或执行 trace。CPU/trace 在收到对应请求后开始采集，采集期间有额外开销。Go 通常已默认开启堆分配采样，heap 请求读取已有采样；`gc=1` 还会主动触发 GC。Weaver 不修改堆采样率，也不主动启用 block/mutex 采样。
+
+### 指标
+
+Weaver 的指标遵循 OpenTelemetry 语义约定，耗时一律使用秒，并按语义约定推荐的边界分桶：
+
+| 指标 | 来源 | 维度 |
+|---|---|---|
+| `rpc.server.call.duration`、`rpc.client.call.duration` | 跨 unit Connect 调用（otelconnect） | `rpc.system.name`、`rpc.method`、`rpc.response.status_code`、失败时的 `error.type`，client 侧另有 `server.address`/`server.port` |
+| `weaver.local.call.duration` | 同 unit 本地代理 | `rpc.method`、`rpc.response.status_code`、失败时的 `error.type` |
+| `http.server.request.duration` | HTTP 组件路由 | 见上文 HTTP 组件 |
+
+`rpc.method` 统一为 `包名.Service/Method`，`rpc.response.status_code` 统一为 `OK` 或大写的 Connect 错误码（如 `DEADLINE_EXCEEDED`），因此同一方法在单体与多 unit 部署下可按相同维度聚合。
+
+未配置 MeterProvider 时指标为 no-op。接入采集只需在调用 `weaver.New` 前设置一次全局 MeterProvider，`NewMeterProvider` 会创建 Provider 并设置为全局。例如使用 `go.opentelemetry.io/otel/exporters/prometheus` 暴露给 Prometheus 拉取：
+
+```go
+exporter, err := prometheus.New()
+if err != nil {
+    return err
+}
+meterProvider := weaver.NewMeterProvider(
+    sdkmetric.WithReader(exporter),
+    sdkmetric.WithResource(serviceResource),
+)
+defer meterProvider.Shutdown(context.Background())
+
+http.Handle("/metrics", promhttp.Handler())
+```
+
+Prometheus exporter 会把名称转换为 `rpc_server_call_duration_seconds`、`weaver_local_call_duration_seconds`、`http_server_request_duration_seconds` 等。也可以改用 OTLP exporter 推送到 OpenTelemetry Collector。OpenTelemetry 全局 API 只会把已创建的指标转发给第一次设置的 MeterProvider，进程内不要替换 Provider。Provider 和 Exporter 的关闭由应用负责。
 
 ## 示例
 
