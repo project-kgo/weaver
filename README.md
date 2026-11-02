@@ -274,6 +274,23 @@ err := weaver.Serve(
 
 需要自定义 TLS、超时或外围 Handler 时，仍可使用 `weaver.New` 获取 `Runtime.Handler()` 并自行管理 `http.Server`。
 
+`Serve` 默认不启动 pprof。通过启动选项在独立端口开启：
+
+```go
+weaver.WithPprofAddress("127.0.0.1:6060")
+```
+
+调试端口绑定失败会返回启动错误并清理 Runtime；运行期调试服务故障只记录日志，不影响业务服务。退出时调试服务在业务服务和组件关闭后直接断开，不等待进行中的 profile。同一主机运行多个 unit 时，需要分配不同端口。`New` 不启动调试服务；业务端口不挂载 pprof 路由。建议只监听回环地址，远程排查可使用端口转发；监听非回环地址前，应由部署环境限制访问。
+
+```bash
+# 请求开始后采集 30 秒 CPU profile
+go tool pprof -http=127.0.0.1:8083 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'
+# 获取当前 Go 堆快照，不等同于进程 RSS
+go tool pprof -http=127.0.0.1:8083 'http://127.0.0.1:6060/debug/pprof/heap'
+```
+
+空闲调试服务仅有监听器和少量 HTTP 服务开销，不会持续进行 CPU profiling 或执行 trace。CPU/trace 在收到对应请求后开始采集，采集期间有额外开销。Go 通常已默认开启堆分配采样，heap 请求读取已有采样；`gc=1` 还会主动触发 GC。Weaver 不修改堆采样率，也不主动启用 block/mutex 采样。
+
 ## 示例
 
 先安装 Buf 和三个生成器：
@@ -307,8 +324,8 @@ go run ./examples/echo/cmd/server \
 拆成两个 unit：
 
 ```bash
-go run ./examples/echo/cmd/server -unit core -config examples/echo/config/microservices.yaml -listen :8081
-go run ./examples/echo/cmd/server -unit game -config examples/echo/config/microservices.yaml -listen :8082
+go run ./examples/echo/cmd/server -unit core -config examples/echo/config/microservices.yaml -listen :8081 -pprof 127.0.0.1:6060
+go run ./examples/echo/cmd/server -unit game -config examples/echo/config/microservices.yaml -listen :8082 -pprof 127.0.0.1:6061
 ```
 
 调用 Echo：

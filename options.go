@@ -30,6 +30,7 @@ type runtimeOptions struct {
 	shutdownHooks   []ShutdownHook
 	externals       []ServiceDescriptor
 	httpMiddlewares []HTTPMiddleware
+	pprofAddress    string
 }
 
 // handlerOption 延迟需要组件代理的 Handler 配置，确保它与普通配置保持注册顺序。
@@ -49,6 +50,15 @@ func newRuntimeOptions() runtimeOptions {
 		resolvers:  make(map[string]Resolver),
 		httpClient: defaultHTTPClient(),
 	}
+}
+
+// WithPprofAddress 为 Serve 开启独立 pprof 服务并设置监听地址，默认不开启。
+// 空字符串表示关闭；New 只创建 Runtime，不启动监听器。
+func WithPprofAddress(address string) Option {
+	return optionFunc(func(options *runtimeOptions) error {
+		options.pprofAddress = address
+		return nil
+	})
 }
 
 // WithRegistry 使用指定注册表代替默认注册表。

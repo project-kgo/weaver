@@ -29,6 +29,7 @@ func TestServeShutdownOnContextCancellation(t *testing.T) {
 		config,
 		"127.0.0.1:0",
 		WithRegistry(registry),
+		WithPprofAddress("127.0.0.1:0"),
 		WithResource(&prefix),
 		WithShutdownHook(func(context.Context) error {
 			events = append(events, "hook:shutdown")
@@ -65,6 +66,7 @@ func TestServeShutdownOnListenFailure(t *testing.T) {
 		config,
 		"invalid-address",
 		WithRegistry(registry),
+		WithPprofAddress("127.0.0.1:0"),
 		WithResource(&prefix),
 	)
 	if err == nil {

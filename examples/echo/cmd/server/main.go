@@ -21,6 +21,7 @@ func run() error {
 	unit := flag.String("unit", os.Getenv("APP_UNIT"), "当前部署单元")
 	configPath := flag.String("config", "config/monolith.yaml", "Weaver YAML 配置")
 	listenAddress := flag.String("listen", ":8080", "HTTP 监听地址")
+	pprofAddress := flag.String("pprof", "", "pprof 监听地址，为空时不开启")
 	flag.Parse()
 
 	data, err := os.ReadFile(*configPath)
@@ -32,5 +33,5 @@ func run() error {
 		return err
 	}
 
-	return weaver.Serve(context.Background(), *unit, config, *listenAddress)
+	return weaver.Serve(context.Background(), *unit, config, *listenAddress, weaver.WithPprofAddress(*pprofAddress))
 }

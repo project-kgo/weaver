@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os/signal"
 	"time"
@@ -37,6 +38,17 @@ func Serve(ctx context.Context, currentUnit string, config Config, listenAddress
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	if address := runtime.options.pprofAddress; address != "" {
+		stopPprof, err := startPprofServer(address)
+		if err != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+			defer cancel()
+			return errors.Join(err, runtime.Shutdown(shutdownCtx))
+		}
+		// 在业务服务和组件关闭完成后才停止，便于排查关闭阶段卡住的问题。
+		defer stopPprof()
+	}
+
 	serveError := make(chan error, 1)
 	go func() {
 		serveError <- server.ListenAndServe()
@@ -65,6 +77,28 @@ func Serve(ctx context.Context, currentUnit string, config Config, listenAddress
 		server.Shutdown(shutdownCtx),
 		runtime.Shutdown(shutdownCtx),
 	)
+}
+
+// startPprofServer 同步监听，让端口冲突在启动阶段暴露。调试服务运行期故障只记录日志，
+// 不影响业务服务；返回的 stop 直接断开连接，不等待进行中的 profile。
+func startPprofServer(address string) (stop func(), err error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("weaver: pprof 监听 %q 失败: %w", address, err)
+	}
+	server := newPprofServer(address)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := normalizeServeError(server.Serve(listener)); err != nil {
+			slog.Error("pprof server failed", "error", err)
+		}
+	}()
+	slog.Info("pprof server listening", "address", listener.Addr().String())
+	return func() {
+		server.Close()
+		<-done
+	}, nil
 }
 
 func normalizeServeError(err error) error {

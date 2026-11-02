@@ -89,6 +89,7 @@ func TestServeSignalHelper(t *testing.T) {
 		config,
 		"127.0.0.1:0",
 		WithRegistry(registry),
+		WithPprofAddress("127.0.0.1:0"),
 		WithShutdownHook(func(context.Context) error {
 			_, err := fmt.Fprintln(os.Stdout, "hook:shutdown")
 			return err
